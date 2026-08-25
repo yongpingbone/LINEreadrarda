@@ -19,7 +19,7 @@ public class MonitorForegroundService extends Service {
     static final String ACTION_POLL = "com.example.linereadradar.POLL";
     static final String EXTRA_SLOT = "slot";
 
-    private static final String CHANNEL_ID = "line_read_radar_background_v041";
+    private static final String CHANNEL_ID = "line_read_radar_background_v042";
     private static final int NOTIFICATION_ID = 7310;
     private static final long HEARTBEAT_MS = 5000L;
     private static final long RETRY_LOCKED_MS = 15000L;
@@ -30,21 +30,21 @@ public class MonitorForegroundService extends Service {
     private final Runnable stateChecker = new Runnable() {
         @Override
         public void run() {
-            if (prefs == null || !prefs.globalEnabled()) {
+            if (prefs == null || !prefs.globalEnabled() || prefs.activeCount() == 0) {
+                stopForeground(true);
+                stopSelf();
+                return;
+            }
+
+            if (prefs.backgroundActiveCount() == 0) {
+                prefs.setGlobalStatus("即時監控中");
                 stopForeground(true);
                 stopSelf();
                 return;
             }
 
             if (prefs.paused()) {
-                prefs.setGlobalStatus("已暫停");
-                updateNotification();
-                handler.postDelayed(this, HEARTBEAT_MS);
-                return;
-            }
-
-            if (!prefs.backgroundPollingEnabled()) {
-                prefs.setGlobalStatus("🟢 即時監控中 · 背景輪巡關閉");
+                prefs.setGlobalStatus("全部監控已暫停");
                 updateNotification();
                 handler.postDelayed(this, HEARTBEAT_MS);
                 return;
@@ -53,7 +53,7 @@ public class MonitorForegroundService extends Service {
             PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
             boolean interactive = pm != null && pm.isInteractive();
             if (interactive) {
-                prefs.setGlobalStatus("🟢 手機使用中 · 背景輪巡自動暫停");
+                prefs.setGlobalStatus("手機使用中 · 背景檢查自動暫停");
                 updateNotification();
                 handler.postDelayed(this, HEARTBEAT_MS);
                 return;
@@ -87,7 +87,7 @@ public class MonitorForegroundService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (!prefs.globalEnabled()) {
+        if (!prefs.globalEnabled() || prefs.backgroundActiveCount() == 0) {
             stopSelf();
             return START_NOT_STICKY;
         }
@@ -114,27 +114,25 @@ public class MonitorForegroundService extends Service {
     public IBinder onBind(Intent intent) { return null; }
 
     private void attemptPoll(long now) {
-        if (prefs.activeCount() == 0) {
-            prefs.setGlobalStatus("沒有啟用中的對象");
-            prefs.setLastPollAt(now);
-            return;
-        }
+        if (prefs.backgroundActiveCount() == 0) return;
 
         KeyguardManager km = (KeyguardManager) getSystemService(KEYGUARD_SERVICE);
         boolean locked = km != null && km.isDeviceLocked();
         if (locked) {
-            prefs.setGlobalStatus("🔒 手機已安全鎖定 · 等待解鎖後補抓");
+            prefs.setGlobalStatus("手機已安全鎖定 · 等待可檢查時機");
             long last = prefs.lastPollAt();
-            if (now - last > RETRY_LOCKED_MS) prefs.setLastPollAt(now - prefs.pollIntervalMs() + RETRY_LOCKED_MS);
+            if (now - last > RETRY_LOCKED_MS) {
+                prefs.setLastPollAt(now - prefs.pollIntervalMs() + RETRY_LOCKED_MS);
+            }
             return;
         }
 
-        int slot = prefs.nextActiveSlot();
+        int slot = prefs.nextBackgroundSlot();
         if (slot < 0) return;
         Prefs.Slot s = prefs.slot(slot);
         prefs.setLastPollAt(now);
-        prefs.setGlobalStatus("🔎 背景準備檢查「" + s.name + "」");
-        prefs.markChecked(slot, now, "等待 LINE 畫面");
+        prefs.setGlobalStatus("背景準備檢查「" + s.name + "」");
+        prefs.markChecked(slot, now, "背景檢查準備中");
 
         Intent command = new Intent(ACTION_POLL);
         command.setPackage(getPackageName());
@@ -147,10 +145,12 @@ public class MonitorForegroundService extends Service {
             try {
                 startActivity(launch);
             } catch (Exception ignored) {
-                prefs.setGlobalStatus("⚠ Android 阻擋背景開啟 LINE · 等待下次");
+                prefs.markChecked(slot, now, "Android 阻擋背景開啟 LINE");
+                prefs.setGlobalStatus("Android 阻擋背景開啟 LINE · 等待下次");
             }
         } else {
-            prefs.setGlobalStatus("⚠ 找不到 LINE App");
+            prefs.markChecked(slot, now, "找不到 LINE App");
+            prefs.setGlobalStatus("找不到 LINE App");
         }
     }
 
@@ -159,10 +159,10 @@ public class MonitorForegroundService extends Service {
             NotificationManager nm = getSystemService(NotificationManager.class);
             NotificationChannel channel = new NotificationChannel(
                 CHANNEL_ID,
-                "監控狀態",
+                "背景檢查狀態",
                 NotificationManager.IMPORTANCE_LOW
             );
-            channel.setDescription("LINE Radar 即時監控與背景輪巡狀態");
+            channel.setDescription("LINE Radar 已開啟背景檢查的人員狀態");
             nm.createNotificationChannel(channel);
         }
     }
@@ -175,8 +175,8 @@ public class MonitorForegroundService extends Service {
         PendingIntent pendingIntent = PendingIntent.getActivity(this, 20, openApp, pendingFlags);
 
         String detail = prefs.paused()
-            ? "已暫停 · 設定與紀錄保留"
-            : prefs.globalStatus() + " · " + prefs.activeCount() + " 位監控中";
+            ? "全部監控已暫停"
+            : prefs.globalStatus() + " · " + prefs.backgroundActiveCount() + " 位背景 ON";
 
         Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
             ? new Notification.Builder(this, CHANNEL_ID)
