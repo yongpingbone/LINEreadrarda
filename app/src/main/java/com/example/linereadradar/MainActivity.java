@@ -47,7 +47,7 @@ public class MainActivity extends Activity {
 
         content.addView(text("LINE 已讀雷達", 26, true));
         content.addView(spacer(8));
-        content.addView(text("只監控你自己的手機畫面。LINE 在前景、分割畫面或浮動視窗且聊天室 UI 可讀時，才可能即時偵測。", 15, false));
+        content.addView(text("雷達 App 可以退到背景持續守候。LINE 聊天室本身仍需處在 Android 無障礙可讀狀態，才能即時偵測。", 15, false));
         content.addView(spacer(18));
 
         content.addView(text("指定對象的 LINE 顯示名稱", 15, true));
@@ -57,13 +57,14 @@ public class MainActivity extends Activity {
         targetInput.setText(prefs.target());
         content.addView(targetInput, new LinearLayout.LayoutParams(-1, -2));
 
-        Button start = button("儲存並開始監控");
+        Button start = button("儲存並開始背景監控");
         start.setOnClickListener(v -> startMonitoring());
         content.addView(start);
 
         Button stop = button("停止監控");
         stop.setOnClickListener(v -> {
             prefs.stop();
+            MonitorForegroundService.stop(this);
             Toast.makeText(this, "已停止監控", Toast.LENGTH_SHORT).show();
             refresh();
         });
@@ -86,7 +87,7 @@ public class MainActivity extends Activity {
         content.addView(statusView);
         content.addView(spacer(18));
         content.addView(text("使用方式", 18, true));
-        content.addView(text("1. 開啟無障礙服務。\n2. 填入指定對象名稱。\n3. 點開始監控。\n4. 進入該聊天室並停在最底部。\n5. 新的已讀出現時會通知一次並停止。", 14, false));
+        content.addView(text("1. 開啟無障礙服務。\n2. 填入指定對象名稱。\n3. 點開始背景監控。\n4. App 會切去 LINE，你可讓雷達留在背景。\n5. 進入指定聊天室並停在最底部。\n6. 偵測到新的已讀後會通知一次並自動結束監控。", 14, false));
         content.addView(spacer(16));
         content.addView(text("歷史紀錄（最多 50 筆）", 18, true));
         historyView = text("", 13, false);
@@ -109,11 +110,20 @@ public class MainActivity extends Activity {
             startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
             return;
         }
+
         prefs.start(target);
+        MonitorForegroundService.start(this);
         refresh();
+
         Intent launch = getPackageManager().getLaunchIntentForPackage("jp.naver.line.android");
-        if (launch != null) startActivity(launch);
-        else Toast.makeText(this, "找不到 LINE App", Toast.LENGTH_LONG).show();
+        if (launch != null) {
+            startActivity(launch);
+            Toast.makeText(this, "背景雷達已啟動", Toast.LENGTH_SHORT).show();
+        } else {
+            MonitorForegroundService.stop(this);
+            prefs.stop();
+            Toast.makeText(this, "找不到 LINE App", Toast.LENGTH_LONG).show();
+        }
     }
 
     private boolean isAccessibilityServiceEnabled() {
@@ -130,8 +140,8 @@ public class MainActivity extends Activity {
         boolean access = isAccessibilityServiceEnabled();
         String state;
         if (!access) state = "⚠ 無障礙服務：未開啟";
-        else if (prefs.enabled() && prefs.armed()) state = "● 監控中：" + prefs.target() + "（基準已建立）";
-        else if (prefs.enabled()) state = "● 等待進入指定聊天室：" + prefs.target();
+        else if (prefs.enabled() && prefs.armed()) state = "● 背景監控中：" + prefs.target() + "（基準已建立）";
+        else if (prefs.enabled()) state = "● 背景守候中，等待指定聊天室：" + prefs.target();
         else state = "○ 目前未監控";
         statusView.setText(state);
         historyView.setText(prefs.history().isEmpty() ? "尚無紀錄" : prefs.history());
