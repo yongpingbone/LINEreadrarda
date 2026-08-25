@@ -26,6 +26,18 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".ExperimentalLabActivity"
+            android:exported="true"
+            android:label="Radar Lab"
+            android:icon="@mipmap/ic_launcher"
+            android:roundIcon="@mipmap/ic_launcher_round">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
         <service
             android:name=".MonitorForegroundService"
             android:exported="false"
@@ -47,5 +59,10 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
         </service>
+
+        <meta-data android:name="xposedmodule" android:value="true" />
+        <meta-data android:name="xposeddescription" android:value="Experimental LINE Radar No-Read hook for the user's own LINE session" />
+        <meta-data android:name="xposedminversion" android:value="53" />
+        <meta-data android:name="xposedscope" android:value="jp.naver.line.android" />
     </application>
 </manifest>
