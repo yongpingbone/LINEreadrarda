@@ -73,7 +73,7 @@ final class Prefs {
         }
 
         boolean backgroundActive() {
-            return active() && backgroundEnabled;
+            return active() && armed && backgroundEnabled;
         }
     }
 
@@ -164,6 +164,7 @@ final class Prefs {
         p.edit()
             .putString(k(index, "name"), value)
             .putBoolean(k(index, "armed"), false)
+            .putBoolean(k(index, "background"), false)
             .putString(k(index, "incoming_sig"), "")
             .putString(k(index, "status"), "名稱已更新，請重新建立基準")
             .apply();
