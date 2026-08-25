@@ -33,10 +33,8 @@ import java.util.Locale;
 public class MainActivity extends Activity {
     private static final int BG = Color.rgb(6, 10, 28);
     private static final int CARD = Color.rgb(16, 23, 51);
-    private static final int CARD_SOFT = Color.rgb(20, 29, 62);
     private static final int TEXT = Color.rgb(244, 246, 255);
     private static final int MUTED = Color.rgb(160, 171, 205);
-    private static final int BLUE = Color.rgb(91, 139, 255);
     private static final int PURPLE = Color.rgb(173, 103, 255);
     private static final int GREEN = Color.rgb(95, 222, 171);
     private static final int AMBER = Color.rgb(255, 202, 108);
@@ -163,11 +161,6 @@ public class MainActivity extends Activity {
             Button add = button("＋ 新增監控對象");
             add.setOnClickListener(v -> showAddDialog());
             pageHost.addView(add, marginLp(0, 12, 0, 22));
-        } else {
-            TextView full = text("已使用全部 5 個監控名額", 13, false, MUTED);
-            full.setGravity(Gravity.CENTER);
-            full.setPadding(0, dp(16), 0, dp(22));
-            pageHost.addView(full);
         }
     }
 
@@ -178,8 +171,9 @@ public class MainActivity extends Activity {
         LinearLayout identity = new LinearLayout(this);
         identity.setOrientation(LinearLayout.VERTICAL);
         identity.addView(text(slot.name, 21, true, TEXT));
-        TextView status = text(slot.enabled ? slot.status : "已暫停", 12, false,
-            !slot.enabled ? MUTED : (slot.armed ? GREEN : AMBER));
+        String statusText = slot.enabled ? slot.status : "已暫停";
+        if (slot.enabled && !slot.armed) statusText = "等待第一次看到聊天室 · 將自動建立基準";
+        TextView status = text(statusText, 12, false, !slot.enabled ? MUTED : (slot.armed ? GREEN : AMBER));
         status.setPadding(0, dp(3), 0, 0);
         identity.addView(status);
         top.addView(identity, new LinearLayout.LayoutParams(0, -2, 1f));
@@ -191,45 +185,38 @@ public class MainActivity extends Activity {
         monitorLabel.setGravity(Gravity.CENTER);
         monitorControl.addView(monitorLabel);
         Switch monitor = systemSwitch(slot.enabled);
-        monitor.setOnCheckedChangeListener((buttonView, checked) -> {
-            prefs.setSlotEnabled(slot.index, checked);
+        monitor.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            prefs.setSlotEnabled(slot.index, isChecked);
             syncMonitoringRuntime();
             renderRadar();
-            if (checked && !prefs.slot(slot.index).armed) showBaselineGuide(slot.index);
         });
         monitorControl.addView(monitor);
         top.addView(monitorControl, new LinearLayout.LayoutParams(dp(76), -2));
         card.addView(top);
 
         if (!slot.armed) {
-            LinearLayout baselineBox = new LinearLayout(this);
-            baselineBox.setOrientation(LinearLayout.VERTICAL);
-            baselineBox.setPadding(dp(12), dp(11), dp(12), dp(11));
-            baselineBox.setBackground(rounded(Color.rgb(40, 37, 57), 14, Color.rgb(112, 91, 90), 1));
-            baselineBox.addView(text("尚未建立基準", 14, true, AMBER));
-            TextView guide = text("先讓 Radar 看一次目前聊天室，之後才知道什麼算新的已讀或新訊息。", 12, false, MUTED);
-            guide.setPadding(0, dp(3), 0, dp(7));
-            baselineBox.addView(guide);
-            Button baseline = smallButton("建立基準");
-            baseline.setOnClickListener(v -> showBaselineGuide(slot.index));
-            baselineBox.addView(baseline, new LinearLayout.LayoutParams(-1, dp(44)));
-            card.addView(baselineBox, marginLp(0, 14, 0, 12));
+            TextView guide = text("不用再按建立基準。你下次進入這個聊天室時，Radar 會自動把當下畫面記成起點。", 12, false, MUTED);
+            guide.setPadding(0, dp(12), 0, dp(4));
+            card.addView(guide);
+            Button openLine = quietButton("開啟 LINE");
+            openLine.setOnClickListener(v -> openLine());
+            card.addView(openLine, marginLp(0, 8, 0, 0));
         } else {
-            TextView checked = text(lastCheckedText(slot.lastCheckedAt), 12, false, MUTED);
-            checked.setPadding(0, dp(9), 0, dp(3));
-            card.addView(checked);
+            TextView checkedText = text(lastCheckedText(slot.lastCheckedAt), 12, false, MUTED);
+            checkedText.setPadding(0, dp(9), 0, dp(3));
+            card.addView(checkedText);
 
             LinearLayout backgroundRow = row();
             backgroundRow.setPadding(0, dp(10), 0, dp(5));
             LinearLayout labels = new LinearLayout(this);
             labels.setOrientation(LinearLayout.VERTICAL);
             labels.addView(text("背景檢查", 15, true, TEXT));
-            labels.addView(text("手機使用中會自動暫停，不搶畫面", 11, false, MUTED));
+            labels.addView(text("實驗功能，主畫面使用中會自動暫停", 11, false, MUTED));
             backgroundRow.addView(labels, new LinearLayout.LayoutParams(0, -2, 1f));
             Switch background = systemSwitch(slot.backgroundEnabled);
             background.setEnabled(slot.enabled);
-            background.setOnCheckedChangeListener((buttonView, checked) -> {
-                prefs.setBackgroundEnabled(slot.index, checked);
+            background.setOnCheckedChangeListener((buttonView, isChecked) -> {
+                prefs.setBackgroundEnabled(slot.index, isChecked);
                 syncMonitoringRuntime();
                 renderRadar();
             });
@@ -250,7 +237,7 @@ public class MainActivity extends Activity {
 
     private void renderHistory() {
         pageHost.addView(text("事件紀錄", 22, true, TEXT), marginLp(4, 8, 0, 2));
-        pageHost.addView(text("只保留真正需要看的已讀、新訊息與基準事件。", 13, false, MUTED), marginLp(4, 0, 0, 12));
+        pageHost.addView(text("訊息正文只有在該人物的「保存訊息內容」開啟時才會永久寫入。", 13, false, MUTED), marginLp(4, 0, 0, 12));
 
         String history = prefs.history();
         if (history.isEmpty()) {
@@ -294,8 +281,8 @@ public class MainActivity extends Activity {
             labels.addView(text("保留人物、基準與歷史紀錄", 12, false, MUTED));
             pauseRow.addView(labels, new LinearLayout.LayoutParams(0, -2, 1f));
             Switch paused = systemSwitch(prefs.paused());
-            paused.setOnCheckedChangeListener((buttonView, checked) -> {
-                prefs.setPaused(checked);
+            paused.setOnCheckedChangeListener((buttonView, isChecked) -> {
+                prefs.setPaused(isChecked);
                 syncMonitoringRuntime();
                 renderSettings();
             });
@@ -304,9 +291,17 @@ public class MainActivity extends Activity {
             pageHost.addView(pauseCard, marginLp(0, 0, 0, 12));
         }
 
+        LinearLayout lab = card(CARD);
+        lab.addView(text("Virtual Display + No-Read", 16, true, TEXT));
+        lab.addView(text("實驗版整合測試。No-Read 只在第二 Display 嘗試阻止 Radar 自己造成的已讀。", 12, false, MUTED));
+        Button openLab = button("開啟 Radar Lab");
+        openLab.setOnClickListener(v -> startActivity(new Intent(this, ExperimentalLabActivity.class)));
+        lab.addView(openLab, marginLp(0, 10, 0, 0));
+        pageHost.addView(lab, marginLp(0, 0, 0, 12));
+
         LinearLayout interval = card(CARD);
         interval.addView(text("背景檢查頻率", 16, true, TEXT));
-        interval.addView(text("只有人物卡的「背景檢查」為 ON 時才會使用。", 12, false, MUTED));
+        interval.addView(text("只有已建立基準且人物卡「背景檢查」為 ON 時使用。", 12, false, MUTED));
         LinearLayout options = row();
         options.setPadding(0, dp(12), 0, 0);
         options.addView(intervalButton("30 秒", 30000L), new LinearLayout.LayoutParams(0, dp(44), 1f));
@@ -316,11 +311,6 @@ public class MainActivity extends Activity {
         options.addView(intervalButton("2 分鐘", 120000L), new LinearLayout.LayoutParams(0, dp(44), 1f));
         interval.addView(options);
         pageHost.addView(interval, marginLp(0, 0, 0, 12));
-
-        LinearLayout rule = card(CARD);
-        rule.addView(text("背景檢查規則", 16, true, TEXT));
-        rule.addView(text("螢幕正在使用時會自動暫停背景檢查。手機要求 PIN／指紋時不會繞過安全鎖。", 12, false, MUTED));
-        pageHost.addView(rule, marginLp(0, 0, 0, 12));
 
         Button accessibility = button(isAccessibilityServiceEnabled() ? "✓ 無障礙服務已開啟" : "開啟無障礙服務");
         accessibility.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
@@ -333,10 +323,6 @@ public class MainActivity extends Activity {
             startActivity(i);
         });
         pageHost.addView(appSettings, marginLp(0, 4, 0, 4));
-
-        TextView note = text("v0.4.2：以人物為主。沒有新增對象就不顯示人物卡，背景檢查也改成每個人獨立控制。", 12, false, MUTED);
-        note.setPadding(dp(6), dp(16), dp(6), dp(24));
-        pageHost.addView(note);
     }
 
     private Button intervalButton(String label, long value) {
@@ -350,7 +336,7 @@ public class MainActivity extends Activity {
         EditText input = dialogInput("LINE 顯示名稱");
         AlertDialog dialog = new AlertDialog.Builder(this)
             .setTitle("新增監控對象")
-            .setMessage("輸入聊天室上方顯示的名稱")
+            .setMessage("輸入聊天室上方顯示的名稱。新增後，第一次看到該聊天室就會自動建立基準。")
             .setView(input)
             .setNegativeButton("取消", null)
             .setPositiveButton("新增", null)
@@ -370,57 +356,8 @@ public class MainActivity extends Activity {
             syncMonitoringRuntime();
             dialog.dismiss();
             renderRadar();
-            showBaselineGuide(result);
         }));
         dialog.show();
-    }
-
-    private void showBaselineGuide(int index) {
-        Prefs.Slot slot = prefs.slot(index);
-        if (slot.name.isEmpty()) return;
-        new AlertDialog.Builder(this)
-            .setTitle("建立「" + slot.name + "」基準")
-            .setMessage(
-                "接下來會開啟 LINE。\n\n" +
-                "1. 進入「" + slot.name + "」聊天室\n" +
-                "2. 停留約 2 秒，不要滑動畫面\n" +
-                "3. 出現「基準已建立」提示後即可完成\n\n" +
-                "Radar 只會把目前畫面記成起點，不會傳送任何訊息。"
-            )
-            .setNegativeButton("稍後", null)
-            .setPositiveButton("前往 LINE", (d, w) -> startBaselineFlow(index))
-            .show();
-    }
-
-    private void startBaselineFlow(int index) {
-        if (!isAccessibilityServiceEnabled()) {
-            new AlertDialog.Builder(this)
-                .setTitle("先開啟無障礙服務")
-                .setMessage("Radar 需要讀取你自己的 LINE 聊天室畫面才能建立基準。開啟後回到這裡，再按一次「建立基準」。")
-                .setNegativeButton("取消", null)
-                .setPositiveButton("開啟設定", (d, w) -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)))
-                .show();
-            return;
-        }
-
-        Prefs.Slot slot = prefs.slot(index);
-        if (slot.name.isEmpty()) return;
-        if (!slot.enabled) prefs.setSlotEnabled(index, true);
-        if (!prefs.globalEnabled()) prefs.setGlobalEnabled(true);
-        prefs.markChecked(index, System.currentTimeMillis(), "正在建立基準 · 請進入聊天室");
-
-        Intent command = new Intent(LineReadAccessibilityService.ACTION_BASELINE);
-        command.setPackage(getPackageName());
-        command.putExtra(MonitorForegroundService.EXTRA_SLOT, index);
-        sendBroadcast(command);
-
-        Intent launch = getPackageManager().getLaunchIntentForPackage("jp.naver.line.android");
-        if (launch == null) {
-            Toast.makeText(this, "找不到 LINE App", Toast.LENGTH_LONG).show();
-            return;
-        }
-        launch.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
-        startActivity(launch);
     }
 
     private void showSlotDialog(int index) {
@@ -436,16 +373,12 @@ public class MainActivity extends Activity {
         Switch messages = dialogSwitch("新訊息補抓", slot.messageEnabled);
         Switch notify = dialogSwitch("系統通知", slot.notifyEnabled);
         Switch vibrate = dialogSwitch("震動提醒", slot.vibrateEnabled);
+        Switch saveContent = dialogSwitch("保存訊息內容到歷史紀錄", slot.saveMessageContentEnabled);
         body.addView(read);
         body.addView(messages);
         body.addView(notify);
         body.addView(vibrate);
-
-        if (slot.armed) {
-            Button rebuild = quietButton("重新建立基準");
-            body.addView(rebuild, new LinearLayout.LayoutParams(-1, dp(44)));
-            rebuild.setOnClickListener(v -> showBaselineGuide(index));
-        }
+        body.addView(saveContent);
 
         AlertDialog dialog = new AlertDialog.Builder(this)
             .setTitle(slot.name)
@@ -462,16 +395,15 @@ public class MainActivity extends Activity {
                     name.setError("名稱不能空白");
                     return;
                 }
-                boolean renamed = !newName.equals(slot.name);
-                if (renamed) prefs.renameTarget(index, newName);
+                if (!newName.equals(slot.name)) prefs.renameTarget(index, newName);
                 prefs.setReadEnabled(index, read.isChecked());
                 prefs.setMessageEnabled(index, messages.isChecked());
                 prefs.setNotifyEnabled(index, notify.isChecked());
                 prefs.setVibrateEnabled(index, vibrate.isChecked());
+                prefs.setSaveMessageContentEnabled(index, saveContent.isChecked());
                 syncMonitoringRuntime();
                 dialog.dismiss();
                 renderRadar();
-                if (renamed) showBaselineGuide(index);
             });
 
             dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setTextColor(Color.rgb(255, 120, 140));
@@ -487,6 +419,16 @@ public class MainActivity extends Activity {
                 }).show());
         });
         dialog.show();
+    }
+
+    private void openLine() {
+        Intent launch = getPackageManager().getLaunchIntentForPackage("jp.naver.line.android");
+        if (launch == null) {
+            Toast.makeText(this, "找不到 LINE App", Toast.LENGTH_LONG).show();
+            return;
+        }
+        launch.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+        startActivity(launch);
     }
 
     private void syncMonitoringRuntime() {
@@ -586,12 +528,6 @@ public class MainActivity extends Activity {
         b.setAllCaps(false);
         b.setBackground(rounded(Color.rgb(25, 33, 66), 15, Color.rgb(63, 76, 128), 1));
         b.setPadding(dp(10), 0, dp(10), 0);
-        return b;
-    }
-
-    private Button smallButton(String label) {
-        Button b = button(label);
-        b.setTextSize(13);
         return b;
     }
 
