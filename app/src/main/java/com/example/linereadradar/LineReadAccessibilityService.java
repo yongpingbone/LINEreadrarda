@@ -29,9 +29,11 @@ import java.util.regex.Pattern;
 public class LineReadAccessibilityService extends AccessibilityService {
     private static final String LINE_PACKAGE = "jp.naver.line.android";
     private static final String READ_TEXT = "已讀";
-    private static final String CHANNEL_ID = "line_read_radar_events_v04";
+    private static final String CHANNEL_ID = "line_read_radar_events_v041";
     private static final long DEBOUNCE_MS = 250L;
     private static final long POLL_TIMEOUT_MS = 12000L;
+    private static final long MANUAL_SESSION_GAP_MS = 1600L;
+    private static final long MANUAL_STABLE_MS = 1000L;
     private static final Pattern TIME_LIKE = Pattern.compile("^(上午|下午)?\\s*\\d{1,2}:\\d{2}$|^\\d{1,2}/\\d{1,2}$|^昨天$|^今天$");
 
     private Prefs prefs;
@@ -39,6 +41,11 @@ public class LineReadAccessibilityService extends AccessibilityService {
     private int requestedSlot = -1;
     private long requestStartedAt = 0L;
     private boolean clickedTargetDuringRequest = false;
+
+    private int manualVisibleSlot = -1;
+    private long manualVisibleSince = 0L;
+    private long manualLastSeenAt = 0L;
+
     private final Handler handler = new Handler(Looper.getMainLooper());
 
     private final Runnable timeoutRunnable = () -> {
@@ -83,12 +90,13 @@ public class LineReadAccessibilityService extends AccessibilityService {
         if (nowElapsed - lastScanAt < DEBOUNCE_MS) return;
         lastScanAt = nowElapsed;
 
+        long now = System.currentTimeMillis();
         if (requestedSlot >= 0) {
-            evaluateRequestedSlot(System.currentTimeMillis());
+            evaluateRequestedSlot(now);
             return;
         }
 
-        evaluateVisibleMonitoredChat(System.currentTimeMillis());
+        evaluateVisibleMonitoredChat(now);
     }
 
     @Override
@@ -132,10 +140,38 @@ public class LineReadAccessibilityService extends AccessibilityService {
             Prefs.Slot slot = prefs.slot(i);
             if (!slot.active()) continue;
             ScanResult scan = scanAvailableLineWindows(slot.name);
-            if (scan.targetVisible) {
-                processSlot(slot, scan, now, false);
+            if (!scan.targetVisible) continue;
+
+            boolean newVisibleSession = manualVisibleSlot != slot.index
+                || manualLastSeenAt <= 0L
+                || now - manualLastSeenAt > MANUAL_SESSION_GAP_MS;
+
+            manualLastSeenAt = now;
+
+            if (newVisibleSession) {
+                manualVisibleSlot = slot.index;
+                manualVisibleSince = now;
+                if (!slot.armed) {
+                    prefs.armSlot(slot.index, scan.readCount, scan.maxReadBottom, scan.incomingSignature, now);
+                    prefs.appendHistory(formatDateTime(now) + "｜" + slot.name + "｜建立即時監控基準");
+                } else {
+                    prefs.updateReadBaseline(slot.index, scan.readCount, scan.maxReadBottom, now);
+                    prefs.updateIncomingSignature(slot.index, scan.incomingSignature, now);
+                    prefs.markChecked(slot.index, now, "即時監控已對準聊天室");
+                }
+                prefs.setGlobalStatus("🟢 即時監控「" + slot.name + "」");
                 return;
             }
+
+            if (now - manualVisibleSince < MANUAL_STABLE_MS) return;
+            processSlot(prefs.slot(slot.index), scan, now, false);
+            return;
+        }
+
+        if (manualLastSeenAt > 0L && now - manualLastSeenAt > MANUAL_SESSION_GAP_MS) {
+            manualVisibleSlot = -1;
+            manualVisibleSince = 0L;
+            manualLastSeenAt = 0L;
         }
     }
 
@@ -174,7 +210,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
             if (!oldSig.isEmpty() && !oldSig.equals(scan.incomingSignature)) {
                 prefs.appendHistory(formatDateTime(now) + "｜" + slot.name + "｜💬 偵測到新訊息內容變化");
                 if (fresh.notifyEnabled) {
-                    notifyEvent(fresh, "💬 " + slot.name + " 有新訊息", "背景巡檢於 " + formatTime(now) + " 發現聊天室有更新", 200 + slot.index);
+                    notifyEvent(fresh, "💬 " + slot.name + " 有新訊息", "聊天室於 " + formatTime(now) + " 偵測到更新", 200 + slot.index);
                 }
                 eventFired = true;
             }
@@ -191,9 +227,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
         requestStartedAt = 0L;
         clickedTargetDuringRequest = false;
         handler.removeCallbacks(timeoutRunnable);
-        if (returnHome) {
-            handler.postDelayed(() -> performGlobalAction(GLOBAL_ACTION_HOME), 550L);
-        }
+        if (returnHome) handler.postDelayed(() -> performGlobalAction(GLOBAL_ACTION_HOME), 550L);
     }
 
     private boolean clickTargetInTree(AccessibilityNodeInfo root, String target) {
