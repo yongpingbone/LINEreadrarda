@@ -13,6 +13,7 @@ final class Prefs {
     private static final String K_MIGRATED = "v04_migrated";
     private static final String K_GLOBAL_ENABLED = "global_enabled";
     private static final String K_PAUSED = "paused";
+    private static final String K_BACKGROUND_POLLING = "background_polling_enabled";
     private static final String K_HISTORY = "history_v04";
     private static final String K_POLL_INDEX = "poll_index";
     private static final String K_LAST_POLL_AT = "last_poll_at";
@@ -70,9 +71,7 @@ final class Prefs {
         }
     }
 
-    private String k(int index, String suffix) {
-        return "slot_" + index + "_" + suffix;
-    }
+    private String k(int index, String suffix) { return "slot_" + index + "_" + suffix; }
 
     Slot slot(int index) {
         if (index < 0 || index >= MAX_SLOTS) return emptySlot(index);
@@ -124,9 +123,7 @@ final class Prefs {
     int addTarget(String name) {
         String value = name == null ? "" : name.trim();
         if (value.isEmpty()) return -1;
-        for (int i = 0; i < MAX_SLOTS; i++) {
-            if (slot(i).name.equalsIgnoreCase(value)) return i;
-        }
+        for (int i = 0; i < MAX_SLOTS; i++) if (slot(i).name.equalsIgnoreCase(value)) return i;
         for (int i = 0; i < MAX_SLOTS; i++) {
             if (slot(i).name.isEmpty()) {
                 p.edit()
@@ -172,25 +169,14 @@ final class Prefs {
 
     void setSlotEnabled(int index, boolean enabled) {
         p.edit().putBoolean(k(index, "enabled"), enabled)
-            .putString(k(index, "status"), enabled ? "等待下一次巡檢" : "已暫停")
+            .putString(k(index, "status"), enabled ? "等待可讀聊天室" : "已暫停")
             .apply();
     }
 
-    void setReadEnabled(int index, boolean enabled) {
-        p.edit().putBoolean(k(index, "read"), enabled).apply();
-    }
-
-    void setMessageEnabled(int index, boolean enabled) {
-        p.edit().putBoolean(k(index, "messages"), enabled).apply();
-    }
-
-    void setNotifyEnabled(int index, boolean enabled) {
-        p.edit().putBoolean(k(index, "notify"), enabled).apply();
-    }
-
-    void setVibrateEnabled(int index, boolean enabled) {
-        p.edit().putBoolean(k(index, "vibrate"), enabled).apply();
-    }
+    void setReadEnabled(int index, boolean enabled) { p.edit().putBoolean(k(index, "read"), enabled).apply(); }
+    void setMessageEnabled(int index, boolean enabled) { p.edit().putBoolean(k(index, "messages"), enabled).apply(); }
+    void setNotifyEnabled(int index, boolean enabled) { p.edit().putBoolean(k(index, "notify"), enabled).apply(); }
+    void setVibrateEnabled(int index, boolean enabled) { p.edit().putBoolean(k(index, "vibrate"), enabled).apply(); }
 
     void armSlot(int index, int count, int maxY, String incomingSignature, long now) {
         p.edit()
@@ -218,41 +204,34 @@ final class Prefs {
     }
 
     void markUnreadSeen(int index, long now) {
-        p.edit()
-            .putLong(k(index, "last_unread"), now)
+        p.edit().putLong(k(index, "last_unread"), now)
             .putLong(k(index, "last_checked"), now)
-            .putString(k(index, "status"), "監控中")
-            .apply();
+            .putString(k(index, "status"), "監控中").apply();
     }
 
     void updateIncomingSignature(int index, String signature, long now) {
-        p.edit()
-            .putString(k(index, "incoming_sig"), signature == null ? "" : signature)
-            .putLong(k(index, "last_checked"), now)
-            .apply();
+        p.edit().putString(k(index, "incoming_sig"), signature == null ? "" : signature)
+            .putLong(k(index, "last_checked"), now).apply();
     }
 
     void markChecked(int index, long now, String status) {
-        p.edit()
-            .putLong(k(index, "last_checked"), now)
-            .putString(k(index, "status"), status == null ? "已檢查" : status)
-            .apply();
+        p.edit().putLong(k(index, "last_checked"), now)
+            .putString(k(index, "status"), status == null ? "已檢查" : status).apply();
     }
 
     boolean globalEnabled() { return p.getBoolean(K_GLOBAL_ENABLED, false); }
     boolean paused() { return p.getBoolean(K_PAUSED, false); }
+    boolean backgroundPollingEnabled() { return p.getBoolean(K_BACKGROUND_POLLING, false); }
 
     void setGlobalEnabled(boolean enabled) {
         p.edit().putBoolean(K_GLOBAL_ENABLED, enabled).putBoolean(K_PAUSED, false).apply();
     }
 
-    void setPaused(boolean paused) {
-        p.edit().putBoolean(K_PAUSED, paused).apply();
-    }
+    void setPaused(boolean paused) { p.edit().putBoolean(K_PAUSED, paused).apply(); }
+    void setBackgroundPollingEnabled(boolean enabled) { p.edit().putBoolean(K_BACKGROUND_POLLING, enabled).apply(); }
 
     int pollIndex() { return p.getInt(K_POLL_INDEX, 0); }
     void setPollIndex(int index) { p.edit().putInt(K_POLL_INDEX, index).apply(); }
-
     long lastPollAt() { return p.getLong(K_LAST_POLL_AT, 0L); }
     void setLastPollAt(long at) { p.edit().putLong(K_LAST_POLL_AT, at).apply(); }
 
@@ -264,7 +243,6 @@ final class Prefs {
 
     String globalStatus() { return p.getString(K_STATUS, "待機中"); }
     void setGlobalStatus(String status) { p.edit().putString(K_STATUS, status).apply(); }
-
     String history() { return p.getString(K_HISTORY, ""); }
 
     void appendHistory(String line) {
@@ -295,7 +273,6 @@ final class Prefs {
 
     private void migrateLegacyIfNeeded() {
         if (p.getBoolean(K_MIGRATED, false)) return;
-
         String legacyTarget = p.getString("target", "").trim();
         boolean legacyEnabled = p.getBoolean("enabled", false);
         SharedPreferences.Editor e = p.edit();
@@ -310,6 +287,7 @@ final class Prefs {
                 .putString(k(0, "status"), "已從 v0.3 匯入，等待重新建立基準");
             if (legacyEnabled) e.putBoolean(K_GLOBAL_ENABLED, true);
         }
+        e.putBoolean(K_BACKGROUND_POLLING, false);
         e.putBoolean(K_MIGRATED, true).apply();
     }
 }
