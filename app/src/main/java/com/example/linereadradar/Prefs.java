@@ -221,10 +221,14 @@ final class Prefs {
 
     boolean globalEnabled() { return p.getBoolean(K_GLOBAL_ENABLED, false); }
     boolean paused() { return p.getBoolean(K_PAUSED, false); }
-    boolean backgroundPollingEnabled() { return p.getBoolean(K_BACKGROUND_POLLING, false); }
+    boolean backgroundPollingEnabled() { return p.getBoolean(K_BACKGROUND_POLLING, globalEnabled()); }
 
     void setGlobalEnabled(boolean enabled) {
-        p.edit().putBoolean(K_GLOBAL_ENABLED, enabled).putBoolean(K_PAUSED, false).apply();
+        p.edit()
+            .putBoolean(K_GLOBAL_ENABLED, enabled)
+            .putBoolean(K_PAUSED, false)
+            .putBoolean(K_BACKGROUND_POLLING, enabled)
+            .apply();
     }
 
     void setPaused(boolean paused) { p.edit().putBoolean(K_PAUSED, paused).apply(); }
@@ -287,7 +291,6 @@ final class Prefs {
                 .putString(k(0, "status"), "已從 v0.3 匯入，等待重新建立基準");
             if (legacyEnabled) e.putBoolean(K_GLOBAL_ENABLED, true);
         }
-        e.putBoolean(K_BACKGROUND_POLLING, false);
         e.putBoolean(K_MIGRATED, true).apply();
     }
 }
