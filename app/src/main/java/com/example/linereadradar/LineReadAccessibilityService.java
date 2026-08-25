@@ -16,6 +16,7 @@ import android.os.SystemClock;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
+import android.widget.Toast;
 
 import java.text.SimpleDateFormat;
 import java.util.ArrayDeque;
@@ -27,11 +28,13 @@ import java.util.Locale;
 import java.util.regex.Pattern;
 
 public class LineReadAccessibilityService extends AccessibilityService {
+    static final String ACTION_BASELINE = "com.example.linereadradar.BASELINE";
+
     private static final String LINE_PACKAGE = "jp.naver.line.android";
     private static final String READ_TEXT = "已讀";
-    private static final String CHANNEL_ID = "line_read_radar_events_v041";
+    private static final String CHANNEL_ID = "line_read_radar_events_v042";
     private static final long DEBOUNCE_MS = 250L;
-    private static final long POLL_TIMEOUT_MS = 12000L;
+    private static final long REQUEST_TIMEOUT_MS = 15000L;
     private static final long MANUAL_SESSION_GAP_MS = 1600L;
     private static final long MANUAL_STABLE_MS = 1000L;
     private static final Pattern TIME_LIKE = Pattern.compile("^(上午|下午)?\\s*\\d{1,2}:\\d{2}$|^\\d{1,2}/\\d{1,2}$|^昨天$|^今天$");
@@ -41,6 +44,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
     private int requestedSlot = -1;
     private long requestStartedAt = 0L;
     private boolean clickedTargetDuringRequest = false;
+    private boolean baselineRequest = false;
 
     private int manualVisibleSlot = -1;
     private long manualVisibleSince = 0L;
@@ -51,22 +55,33 @@ public class LineReadAccessibilityService extends AccessibilityService {
     private final Runnable timeoutRunnable = () -> {
         if (requestedSlot < 0) return;
         Prefs.Slot slot = prefs.slot(requestedSlot);
-        prefs.markChecked(requestedSlot, System.currentTimeMillis(), "找不到聊天室，等待下次或手動開啟 LINE");
-        prefs.setGlobalStatus("⚠ 找不到「" + slot.name + "」，等待下次巡檢");
-        clearPollRequest(false);
+        long now = System.currentTimeMillis();
+        if (baselineRequest) {
+            prefs.markChecked(requestedSlot, now, "尚未建立基準 · 請再試一次");
+            prefs.setGlobalStatus("尚未找到「" + slot.name + "」聊天室");
+            Toast.makeText(this, "沒有找到「" + slot.name + "」聊天室，請再按一次建立基準", Toast.LENGTH_LONG).show();
+        } else {
+            prefs.markChecked(requestedSlot, now, "背景檢查找不到聊天室");
+            prefs.setGlobalStatus("找不到「" + slot.name + "」，等待下次背景檢查");
+        }
+        clearRequest(false);
     };
 
-    private final BroadcastReceiver pollReceiver = new BroadcastReceiver() {
+    private final BroadcastReceiver requestReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
-            if (intent == null || !MonitorForegroundService.ACTION_POLL.equals(intent.getAction())) return;
+            if (intent == null || intent.getAction() == null) return;
+            String action = intent.getAction();
+            if (!MonitorForegroundService.ACTION_POLL.equals(action) && !ACTION_BASELINE.equals(action)) return;
+
             int slot = intent.getIntExtra(MonitorForegroundService.EXTRA_SLOT, -1);
             if (slot < 0 || slot >= Prefs.MAX_SLOTS) return;
             requestedSlot = slot;
             requestStartedAt = System.currentTimeMillis();
             clickedTargetDuringRequest = false;
+            baselineRequest = ACTION_BASELINE.equals(action);
             handler.removeCallbacks(timeoutRunnable);
-            handler.postDelayed(timeoutRunnable, POLL_TIMEOUT_MS);
+            handler.postDelayed(timeoutRunnable, REQUEST_TIMEOUT_MS);
         }
     };
 
@@ -75,9 +90,11 @@ public class LineReadAccessibilityService extends AccessibilityService {
         super.onCreate();
         prefs = new Prefs(this);
         ensureNotificationChannel();
-        IntentFilter filter = new IntentFilter(MonitorForegroundService.ACTION_POLL);
-        if (Build.VERSION.SDK_INT >= 33) registerReceiver(pollReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
-        else registerReceiver(pollReceiver, filter);
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(MonitorForegroundService.ACTION_POLL);
+        filter.addAction(ACTION_BASELINE);
+        if (Build.VERSION.SDK_INT >= 33) registerReceiver(requestReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        else registerReceiver(requestReceiver, filter);
     }
 
     @Override
@@ -105,7 +122,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
     @Override
     public void onDestroy() {
         handler.removeCallbacks(timeoutRunnable);
-        try { unregisterReceiver(pollReceiver); } catch (Exception ignored) {}
+        try { unregisterReceiver(requestReceiver); } catch (Exception ignored) {}
         super.onDestroy();
     }
 
@@ -113,13 +130,18 @@ public class LineReadAccessibilityService extends AccessibilityService {
         if (requestedSlot < 0) return;
         Prefs.Slot slot = prefs.slot(requestedSlot);
         if (!slot.active()) {
-            clearPollRequest(false);
+            clearRequest(false);
+            return;
+        }
+        if (!baselineRequest && !slot.backgroundActive()) {
+            clearRequest(false);
             return;
         }
 
         ScanResult scan = scanAvailableLineWindows(slot.name);
         if (scan.targetVisible) {
-            processSlot(slot, scan, now, true);
+            if (baselineRequest) establishBaseline(slot, scan, now);
+            else processSlot(slot, scan, now, true);
             return;
         }
 
@@ -127,18 +149,26 @@ public class LineReadAccessibilityService extends AccessibilityService {
         if (isLineRoot(root) && !clickedTargetDuringRequest) {
             if (clickTargetInTree(root, slot.name)) {
                 clickedTargetDuringRequest = true;
-                prefs.setGlobalStatus("🔎 已找到「" + slot.name + "」，正在開啟聊天室");
+                prefs.markChecked(slot.index, now, baselineRequest ? "正在開啟聊天室建立基準" : "背景檢查正在開啟聊天室");
                 return;
             }
         }
 
-        if (now - requestStartedAt > POLL_TIMEOUT_MS) timeoutRunnable.run();
+        if (now - requestStartedAt > REQUEST_TIMEOUT_MS) timeoutRunnable.run();
+    }
+
+    private void establishBaseline(Prefs.Slot slot, ScanResult scan, long now) {
+        prefs.armSlot(slot.index, scan.readCount, scan.maxReadBottom, scan.incomingSignature, now);
+        prefs.appendHistory(formatDateTime(now) + "｜" + slot.name + "｜基準已建立");
+        prefs.setGlobalStatus(slot.name + " 基準已建立");
+        Toast.makeText(this, "「" + slot.name + "」基準已建立 ✓", Toast.LENGTH_LONG).show();
+        clearRequest(false);
     }
 
     private void evaluateVisibleMonitoredChat(long now) {
         for (int i = 0; i < Prefs.MAX_SLOTS; i++) {
             Prefs.Slot slot = prefs.slot(i);
-            if (!slot.active()) continue;
+            if (!slot.active() || !slot.armed) continue;
             ScanResult scan = scanAvailableLineWindows(slot.name);
             if (!scan.targetVisible) continue;
 
@@ -151,15 +181,10 @@ public class LineReadAccessibilityService extends AccessibilityService {
             if (newVisibleSession) {
                 manualVisibleSlot = slot.index;
                 manualVisibleSince = now;
-                if (!slot.armed) {
-                    prefs.armSlot(slot.index, scan.readCount, scan.maxReadBottom, scan.incomingSignature, now);
-                    prefs.appendHistory(formatDateTime(now) + "｜" + slot.name + "｜建立即時監控基準");
-                } else {
-                    prefs.updateReadBaseline(slot.index, scan.readCount, scan.maxReadBottom, now);
-                    prefs.updateIncomingSignature(slot.index, scan.incomingSignature, now);
-                    prefs.markChecked(slot.index, now, "即時監控已對準聊天室");
-                }
-                prefs.setGlobalStatus("🟢 即時監控「" + slot.name + "」");
+                prefs.updateReadBaseline(slot.index, scan.readCount, scan.maxReadBottom, now);
+                prefs.updateIncomingSignature(slot.index, scan.incomingSignature, now);
+                prefs.markChecked(slot.index, now, "即時監控已對準聊天室");
+                prefs.setGlobalStatus("即時監控「" + slot.name + "」");
                 return;
             }
 
@@ -177,10 +202,8 @@ public class LineReadAccessibilityService extends AccessibilityService {
 
     private void processSlot(Prefs.Slot slot, ScanResult scan, long now, boolean automatedPoll) {
         if (!slot.armed) {
-            prefs.armSlot(slot.index, scan.readCount, scan.maxReadBottom, scan.incomingSignature, now);
-            prefs.appendHistory(formatDateTime(now) + "｜" + slot.name + "｜建立監控基準");
-            prefs.setGlobalStatus("🟢 " + slot.name + " 基準已建立");
-            if (automatedPoll) clearPollRequest(true);
+            prefs.markChecked(slot.index, now, "尚未建立基準");
+            if (automatedPoll) clearRequest(false);
             return;
         }
 
@@ -218,14 +241,15 @@ public class LineReadAccessibilityService extends AccessibilityService {
         }
 
         prefs.markChecked(slot.index, now, eventFired ? "剛偵測到更新" : "監控中");
-        prefs.setGlobalStatus("🟢 剛檢查「" + slot.name + "」");
-        if (automatedPoll) clearPollRequest(true);
+        prefs.setGlobalStatus("剛檢查「" + slot.name + "」");
+        if (automatedPoll) clearRequest(true);
     }
 
-    private void clearPollRequest(boolean returnHome) {
+    private void clearRequest(boolean returnHome) {
         requestedSlot = -1;
         requestStartedAt = 0L;
         clickedTargetDuringRequest = false;
+        baselineRequest = false;
         handler.removeCallbacks(timeoutRunnable);
         if (returnHome) handler.postDelayed(() -> performGlobalAction(GLOBAL_ACTION_HOME), 550L);
     }
