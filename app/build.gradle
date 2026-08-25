@@ -10,7 +10,11 @@ android {
         applicationId 'com.example.linereadradar'
         minSdk 26
         targetSdk 35
-        versionCode 7
-        versionName '0.4.3'
+        versionCode 8
+        versionName '0.5.2-exp'
     }
+}
+
+dependencies {
+    compileOnly 'de.robv.android.xposed:api:82'
 }
