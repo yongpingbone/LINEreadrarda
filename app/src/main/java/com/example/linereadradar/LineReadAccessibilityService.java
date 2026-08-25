@@ -36,7 +36,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
     static final String ACTION_BASELINE = "com.example.linereadradar.BASELINE";
 
     private static final String LINE_PACKAGE = "jp.naver.line.android";
-    private static final String CHANNEL_ID = "line_read_radar_events_v043";
+    private static final String CHANNEL_ID = "line_read_radar_events_v052";
     private static final long DEBOUNCE_MS = 250L;
     private static final long REQUEST_TIMEOUT_MS = 15000L;
     private static final long MANUAL_SESSION_GAP_MS = 1600L;
@@ -50,7 +50,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
     );
 
     private static final Set<String> UI_LABELS = setOf(
-        "聊天", "主頁", "首页", "主頁", "VOOM", "錢包", "钱包",
+        "聊天", "主頁", "首页", "VOOM", "錢包", "钱包",
         "Chats", "Home", "Wallet", "Talk", "ホーム", "トーク", "ウォレット",
         "채팅", "홈", "지갑"
     );
@@ -197,8 +197,6 @@ public class LineReadAccessibilityService extends AccessibilityService {
                 manualVisibleSlot = slot.index;
                 manualVisibleSince = now;
                 prefs.setGlobalStatus("即時監控「" + slot.name + "」");
-
-                // 重要：重新進入聊天室時先用舊基準比對，不先覆蓋基準。
                 processSlot(slot, scan, now, false);
                 return;
             }
@@ -247,7 +245,11 @@ public class LineReadAccessibilityService extends AccessibilityService {
             String oldSig = fresh.incomingSignature;
             if (!oldSig.isEmpty() && !oldSig.equals(scan.incomingSignature)) {
                 String preview = scan.incomingPreview.isEmpty() ? "偵測到聊天室內容更新" : scan.incomingPreview;
-                prefs.appendHistory(formatDateTime(now) + "｜" + slot.name + "｜💬 新訊息");
+                String history = formatDateTime(now) + "｜" + slot.name + "｜💬 新訊息";
+                if (fresh.saveMessageContentEnabled && !scan.incomingPreview.isEmpty()) {
+                    history += "｜" + sanitizeHistoryText(scan.incomingPreview);
+                }
+                prefs.appendHistory(history);
                 if (fresh.notifyEnabled) {
                     notifyEvent(fresh, "💬 " + slot.name, preview, 200 + slot.index);
                 }
@@ -256,13 +258,19 @@ public class LineReadAccessibilityService extends AccessibilityService {
             prefs.updateIncomingSignature(slot.index, scan.incomingSignature, now);
         }
 
-        // 最後才更新讀取基準，避免回到聊天室時吃掉離開期間的變化。
         if (!eventFired && slot.readEnabled) {
             prefs.updateReadBaseline(slot.index, scan.readCount, scan.maxReadBottom, now);
         }
         prefs.markChecked(slot.index, now, eventFired ? "剛偵測到更新" : "監控中");
         prefs.setGlobalStatus("剛檢查「" + slot.name + "」");
         if (automatedPoll) clearRequest(true);
+    }
+
+    private String sanitizeHistoryText(String value) {
+        if (value == null) return "";
+        String clean = value.replace('\n', ' ').replace('\r', ' ').trim();
+        if (clean.length() > 240) clean = clean.substring(0, 240) + "…";
+        return clean;
     }
 
     private void clearRequest(boolean returnHome) {
@@ -413,8 +421,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
         if (isReadLabel(value)) return false;
         if (TIME_LIKE.matcher(value).matches()) return false;
         if (UI_LABELS.contains(value)) return false;
-        if (value.length() > 500) return false;
-        return true;
+        return value.length() <= 500;
     }
 
     private boolean isReadLabel(String value) {
