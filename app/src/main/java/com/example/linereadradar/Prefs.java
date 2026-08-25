@@ -36,6 +36,7 @@ final class Prefs {
         final boolean messageEnabled;
         final boolean notifyEnabled;
         final boolean vibrateEnabled;
+        final boolean saveMessageContentEnabled;
         final boolean armed;
         final int baseCount;
         final int baseMaxY;
@@ -47,8 +48,9 @@ final class Prefs {
 
         Slot(int index, String name, boolean enabled, boolean backgroundEnabled,
              boolean readEnabled, boolean messageEnabled, boolean notifyEnabled,
-             boolean vibrateEnabled, boolean armed, int baseCount, int baseMaxY,
-             long armedAt, String incomingSignature, long lastCheckedAt,
+             boolean vibrateEnabled, boolean saveMessageContentEnabled,
+             boolean armed, int baseCount, int baseMaxY, long armedAt,
+             String incomingSignature, long lastCheckedAt,
              long lastUnreadSeenAt, String status) {
             this.index = index;
             this.name = name;
@@ -58,6 +60,7 @@ final class Prefs {
             this.messageEnabled = messageEnabled;
             this.notifyEnabled = notifyEnabled;
             this.vibrateEnabled = vibrateEnabled;
+            this.saveMessageContentEnabled = saveMessageContentEnabled;
             this.armed = armed;
             this.baseCount = baseCount;
             this.baseMaxY = baseMaxY;
@@ -90,6 +93,7 @@ final class Prefs {
             p.getBoolean(k(index, "messages"), true),
             p.getBoolean(k(index, "notify"), true),
             p.getBoolean(k(index, "vibrate"), false),
+            p.getBoolean(k(index, "save_content"), false),
             p.getBoolean(k(index, "armed"), false),
             p.getInt(k(index, "base_count"), 0),
             p.getInt(k(index, "base_max_y"), -1),
@@ -102,7 +106,7 @@ final class Prefs {
     }
 
     private Slot emptySlot(int index) {
-        return new Slot(index, "", true, false, true, true, true, false,
+        return new Slot(index, "", true, false, true, true, true, false, false,
             false, 0, -1, 0L, "", 0L, 0L, "尚未建立基準");
     }
 
@@ -147,6 +151,7 @@ final class Prefs {
                     .putBoolean(k(i, "messages"), true)
                     .putBoolean(k(i, "notify"), true)
                     .putBoolean(k(i, "vibrate"), false)
+                    .putBoolean(k(i, "save_content"), false)
                     .putBoolean(k(i, "armed"), false)
                     .putString(k(i, "incoming_sig"), "")
                     .putString(k(i, "status"), "尚未建立基準")
@@ -174,7 +179,7 @@ final class Prefs {
         if (index < 0 || index >= MAX_SLOTS) return;
         SharedPreferences.Editor e = p.edit();
         String[] suffixes = new String[]{
-            "name", "enabled", "background", "read", "messages", "notify", "vibrate",
+            "name", "enabled", "background", "read", "messages", "notify", "vibrate", "save_content",
             "armed", "base_count", "base_max_y", "armed_at", "incoming_sig",
             "last_checked", "last_unread", "status"
         };
@@ -196,6 +201,7 @@ final class Prefs {
     void setMessageEnabled(int index, boolean enabled) { p.edit().putBoolean(k(index, "messages"), enabled).apply(); }
     void setNotifyEnabled(int index, boolean enabled) { p.edit().putBoolean(k(index, "notify"), enabled).apply(); }
     void setVibrateEnabled(int index, boolean enabled) { p.edit().putBoolean(k(index, "vibrate"), enabled).apply(); }
+    void setSaveMessageContentEnabled(int index, boolean enabled) { p.edit().putBoolean(k(index, "save_content"), enabled).apply(); }
 
     void armSlot(int index, int count, int maxY, String incomingSignature, long now) {
         p.edit()
@@ -303,6 +309,7 @@ final class Prefs {
                 .putBoolean(k(0, "messages"), true)
                 .putBoolean(k(0, "notify"), true)
                 .putBoolean(k(0, "vibrate"), false)
+                .putBoolean(k(0, "save_content"), false)
                 .putBoolean(k(0, "armed"), false)
                 .putString(k(0, "status"), "尚未建立基準");
             if (legacyEnabled) e.putBoolean(K_GLOBAL_ENABLED, true);
