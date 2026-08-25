@@ -1,4 +1,4 @@
 <resources>
-    <string name="app_name">LINE 已讀雷達</string>
-    <string name="accessibility_service_description">只在 LINE 畫面可讀時，偵測指定聊天室中新的「已讀」狀態。資料僅儲存在本機。</string>
+    <string name="app_name">LINE Radar</string>
+    <string name="accessibility_service_description">在你自己的 LINE 畫面可讀時，檢查最多五個指定聊天室的已讀與新訊息變化。資料僅儲存在本機。</string>
 </resources>

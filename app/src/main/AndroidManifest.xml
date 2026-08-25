@@ -11,9 +11,11 @@
 
     <application
         android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"
         android:supportsRtl="true"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        android:theme="@style/AppTheme">
 
         <activity
             android:name=".MainActivity"
@@ -30,13 +32,13 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Keeps the user's explicit LINE read monitoring session alive while this app is backgrounded." />
+                android:value="Keeps the user's explicit LINE read and message monitoring session alive while this app is backgrounded." />
         </service>
 
         <service
             android:name=".LineReadAccessibilityService"
             android:exported="false"
-            android:label="LINE 已讀雷達"
+            android:label="LINE Radar"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />

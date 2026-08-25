@@ -1,5 +1,6 @@
 package com.example.linereadradar;
 
+import android.app.KeyguardManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -14,9 +15,13 @@ import android.os.IBinder;
 import android.os.Looper;
 
 public class MonitorForegroundService extends Service {
-    private static final String CHANNEL_ID = "line_read_radar_background";
+    static final String ACTION_POLL = "com.example.linereadradar.POLL";
+    static final String EXTRA_SLOT = "slot";
+
+    private static final String CHANNEL_ID = "line_read_radar_background_v04";
     private static final int NOTIFICATION_ID = 7310;
-    private static final long CHECK_INTERVAL_MS = 5000L;
+    private static final long HEARTBEAT_MS = 5000L;
+    private static final long RETRY_LOCKED_MS = 15000L;
 
     private Prefs prefs;
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -24,23 +29,34 @@ public class MonitorForegroundService extends Service {
     private final Runnable stateChecker = new Runnable() {
         @Override
         public void run() {
-            if (prefs == null || !prefs.enabled()) {
+            if (prefs == null || !prefs.globalEnabled()) {
                 stopForeground(true);
                 stopSelf();
                 return;
             }
+
+            if (prefs.paused()) {
+                prefs.setGlobalStatus("已暫停");
+                updateNotification();
+                handler.postDelayed(this, HEARTBEAT_MS);
+                return;
+            }
+
+            long now = System.currentTimeMillis();
+            long since = now - prefs.lastPollAt();
+            if (since >= prefs.pollIntervalMs()) {
+                attemptPoll(now);
+            }
+
             updateNotification();
-            handler.postDelayed(this, CHECK_INTERVAL_MS);
+            handler.postDelayed(this, HEARTBEAT_MS);
         }
     };
 
     public static void start(Context context) {
         Intent intent = new Intent(context, MonitorForegroundService.class);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            context.startForegroundService(intent);
-        } else {
-            context.startService(intent);
-        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent);
+        else context.startService(intent);
     }
 
     public static void stop(Context context) {
@@ -56,7 +72,7 @@ public class MonitorForegroundService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (!prefs.enabled()) {
+        if (!prefs.globalEnabled()) {
             stopSelf();
             return START_NOT_STICKY;
         }
@@ -69,7 +85,7 @@ public class MonitorForegroundService extends Service {
         }
 
         handler.removeCallbacks(stateChecker);
-        handler.postDelayed(stateChecker, CHECK_INTERVAL_MS);
+        handler.post(stateChecker);
         return START_STICKY;
     }
 
@@ -80,8 +96,47 @@ public class MonitorForegroundService extends Service {
     }
 
     @Override
-    public IBinder onBind(Intent intent) {
-        return null;
+    public IBinder onBind(Intent intent) { return null; }
+
+    private void attemptPoll(long now) {
+        if (prefs.activeCount() == 0) {
+            prefs.setGlobalStatus("沒有啟用中的對象");
+            prefs.setLastPollAt(now);
+            return;
+        }
+
+        KeyguardManager km = (KeyguardManager) getSystemService(KEYGUARD_SERVICE);
+        boolean locked = km != null && km.isDeviceLocked();
+        if (locked) {
+            prefs.setGlobalStatus("🔒 手機已安全鎖定，解鎖後補抓");
+            long last = prefs.lastPollAt();
+            if (now - last > RETRY_LOCKED_MS) prefs.setLastPollAt(now - prefs.pollIntervalMs() + RETRY_LOCKED_MS);
+            return;
+        }
+
+        int slot = prefs.nextActiveSlot();
+        if (slot < 0) return;
+        Prefs.Slot s = prefs.slot(slot);
+        prefs.setLastPollAt(now);
+        prefs.setGlobalStatus("🔎 準備檢查「" + s.name + "」");
+        prefs.markChecked(slot, now, "等待 LINE 畫面");
+
+        Intent command = new Intent(ACTION_POLL);
+        command.setPackage(getPackageName());
+        command.putExtra(EXTRA_SLOT, slot);
+        sendBroadcast(command);
+
+        Intent launch = getPackageManager().getLaunchIntentForPackage("jp.naver.line.android");
+        if (launch != null) {
+            launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+            try {
+                startActivity(launch);
+            } catch (Exception ignored) {
+                prefs.setGlobalStatus("⚠ Android 阻擋背景開啟 LINE，等待手動開啟");
+            }
+        } else {
+            prefs.setGlobalStatus("⚠ 找不到 LINE App");
+        }
     }
 
     private void ensureChannel() {
@@ -92,7 +147,7 @@ public class MonitorForegroundService extends Service {
                 "背景監控狀態",
                 NotificationManager.IMPORTANCE_LOW
             );
-            channel.setDescription("顯示 LINE 已讀雷達目前是否正在背景守候");
+            channel.setDescription("LINE Radar 背景輪巡與鎖定狀態");
             nm.createNotificationChannel(channel);
         }
     }
@@ -101,23 +156,21 @@ public class MonitorForegroundService extends Service {
         Intent openApp = new Intent(this, MainActivity.class);
         openApp.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
         int pendingFlags = PendingIntent.FLAG_UPDATE_CURRENT;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            pendingFlags |= PendingIntent.FLAG_IMMUTABLE;
-        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) pendingFlags |= PendingIntent.FLAG_IMMUTABLE;
         PendingIntent pendingIntent = PendingIntent.getActivity(this, 20, openApp, pendingFlags);
 
-        String target = prefs.target().isEmpty() ? "指定聊天室" : prefs.target();
-        String detail = prefs.armed()
-            ? "基準已建立，雷達 App 可留在背景"
-            : "等待進入「" + target + "」聊天室建立基準";
+        String title = "LINE Radar ✦";
+        String detail;
+        if (prefs.paused()) detail = "已暫停 · 設定與紀錄都保留";
+        else detail = prefs.globalStatus() + " · " + prefs.activeCount() + " 位監控中";
 
         Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
             ? new Notification.Builder(this, CHANNEL_ID)
             : new Notification.Builder(this);
 
         return builder
-            .setSmallIcon(android.R.drawable.ic_menu_view)
-            .setContentTitle("LINE 已讀雷達｜背景監控中：" + target)
+            .setSmallIcon(R.drawable.ic_notify_chat_star)
+            .setContentTitle(title)
             .setContentText(detail)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
