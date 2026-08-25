@@ -1,6 +1,7 @@
 package com.example.linereadradar;
 
 import android.accessibilityservice.AccessibilityService;
+import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
@@ -21,23 +22,38 @@ import android.widget.Toast;
 import java.text.SimpleDateFormat;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.Date;
 import java.util.Deque;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 public class LineReadAccessibilityService extends AccessibilityService {
     static final String ACTION_BASELINE = "com.example.linereadradar.BASELINE";
 
     private static final String LINE_PACKAGE = "jp.naver.line.android";
-    private static final String READ_TEXT = "已讀";
-    private static final String CHANNEL_ID = "line_read_radar_events_v042";
+    private static final String CHANNEL_ID = "line_read_radar_events_v043";
     private static final long DEBOUNCE_MS = 250L;
     private static final long REQUEST_TIMEOUT_MS = 15000L;
     private static final long MANUAL_SESSION_GAP_MS = 1600L;
     private static final long MANUAL_STABLE_MS = 1000L;
-    private static final Pattern TIME_LIKE = Pattern.compile("^(上午|下午)?\\s*\\d{1,2}:\\d{2}$|^\\d{1,2}/\\d{1,2}$|^昨天$|^今天$");
+    private static final Pattern TIME_LIKE = Pattern.compile(
+        "^(上午|下午|AM|PM|am|pm)?\\s*\\d{1,2}:\\d{2}$|^\\d{1,2}/\\d{1,2}$|^昨天$|^今天$|^Yesterday$|^Today$|^昨日$|^今日$|^어제$|^오늘$"
+    );
+
+    private static final Set<String> READ_LABELS = setOf(
+        "已讀", "已读", "Read", "READ", "read", "既読", "읽음"
+    );
+
+    private static final Set<String> UI_LABELS = setOf(
+        "聊天", "主頁", "首页", "主頁", "VOOM", "錢包", "钱包",
+        "Chats", "Home", "Wallet", "Talk", "ホーム", "トーク", "ウォレット",
+        "채팅", "홈", "지갑"
+    );
 
     private Prefs prefs;
     private long lastScanAt = 0L;
@@ -112,7 +128,6 @@ public class LineReadAccessibilityService extends AccessibilityService {
             evaluateRequestedSlot(now);
             return;
         }
-
         evaluateVisibleMonitoredChat(now);
     }
 
@@ -181,10 +196,10 @@ public class LineReadAccessibilityService extends AccessibilityService {
             if (newVisibleSession) {
                 manualVisibleSlot = slot.index;
                 manualVisibleSince = now;
-                prefs.updateReadBaseline(slot.index, scan.readCount, scan.maxReadBottom, now);
-                prefs.updateIncomingSignature(slot.index, scan.incomingSignature, now);
-                prefs.markChecked(slot.index, now, "即時監控已對準聊天室");
                 prefs.setGlobalStatus("即時監控「" + slot.name + "」");
+
+                // 重要：重新進入聊天室時先用舊基準比對，不先覆蓋基準。
+                processSlot(slot, scan, now, false);
                 return;
             }
 
@@ -231,15 +246,20 @@ public class LineReadAccessibilityService extends AccessibilityService {
         if (fresh.messageEnabled && !scan.incomingSignature.isEmpty()) {
             String oldSig = fresh.incomingSignature;
             if (!oldSig.isEmpty() && !oldSig.equals(scan.incomingSignature)) {
-                prefs.appendHistory(formatDateTime(now) + "｜" + slot.name + "｜💬 偵測到新訊息內容變化");
+                String preview = scan.incomingPreview.isEmpty() ? "偵測到聊天室內容更新" : scan.incomingPreview;
+                prefs.appendHistory(formatDateTime(now) + "｜" + slot.name + "｜💬 新訊息");
                 if (fresh.notifyEnabled) {
-                    notifyEvent(fresh, "💬 " + slot.name + " 有新訊息", "聊天室於 " + formatTime(now) + " 偵測到更新", 200 + slot.index);
+                    notifyEvent(fresh, "💬 " + slot.name, preview, 200 + slot.index);
                 }
                 eventFired = true;
             }
             prefs.updateIncomingSignature(slot.index, scan.incomingSignature, now);
         }
 
+        // 最後才更新讀取基準，避免回到聊天室時吃掉離開期間的變化。
+        if (!eventFired && slot.readEnabled) {
+            prefs.updateReadBaseline(slot.index, scan.readCount, scan.maxReadBottom, now);
+        }
         prefs.markChecked(slot.index, now, eventFired ? "剛偵測到更新" : "監控中");
         prefs.setGlobalStatus("剛檢查「" + slot.name + "」");
         if (automatedPoll) clearRequest(true);
@@ -279,7 +299,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
         boolean targetVisible = false;
         int readCount = 0;
         int maxReadBottom = -1;
-        List<String> incoming = new ArrayList<>();
+        List<MessageToken> incoming = new ArrayList<>();
 
         List<AccessibilityWindowInfo> windows = getWindows();
         if (windows != null) {
@@ -292,7 +312,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
                 targetVisible |= result.targetVisible;
                 readCount += result.readCount;
                 maxReadBottom = Math.max(maxReadBottom, result.maxReadBottom);
-                if (!result.incomingSignature.isEmpty()) incoming.add(result.incomingSignature);
+                incoming.addAll(result.incomingTokens);
             }
         }
 
@@ -303,11 +323,12 @@ public class LineReadAccessibilityService extends AccessibilityService {
                 targetVisible = result.targetVisible;
                 readCount = result.readCount;
                 maxReadBottom = result.maxReadBottom;
-                if (!result.incomingSignature.isEmpty()) incoming.add(result.incomingSignature);
+                incoming.addAll(result.incomingTokens);
             }
         }
 
-        return new ScanResult(targetVisible, readCount, maxReadBottom, join(incoming));
+        Collections.sort(incoming, Comparator.comparingInt(t -> t.top));
+        return buildScanResult(targetVisible, readCount, maxReadBottom, incoming);
     }
 
     private boolean isLineRoot(AccessibilityNodeInfo root) {
@@ -321,8 +342,8 @@ public class LineReadAccessibilityService extends AccessibilityService {
         Rect rootBounds = new Rect();
         root.getBoundsInScreen(rootBounds);
         int headerLimit = rootBounds.top + Math.max(1, (int) (rootBounds.height() * 0.25f));
-        int leftMessageLimit = rootBounds.left + (int) (rootBounds.width() * 0.58f);
-        List<String> incomingTokens = new ArrayList<>();
+        int leftMessageLimit = rootBounds.left + (int) (rootBounds.width() * 0.62f);
+        List<MessageToken> candidates = new ArrayList<>();
         Deque<AccessibilityNodeInfo> stack = new ArrayDeque<>();
         stack.push(root);
 
@@ -333,16 +354,18 @@ public class LineReadAccessibilityService extends AccessibilityService {
             Rect r = new Rect();
             node.getBoundsInScreen(r);
 
-            if ((matchesTarget(text, target) || matchesTarget(desc, target)) && r.top <= headerLimit) targetVisible = true;
+            if ((matchesTarget(text, target) || matchesTarget(desc, target)) && r.top <= headerLimit) {
+                targetVisible = true;
+            }
 
-            if (READ_TEXT.equals(text) || READ_TEXT.equals(desc)) {
+            if (isReadLabel(text) || isReadLabel(desc)) {
                 readCount++;
                 maxReadBottom = Math.max(maxReadBottom, r.bottom);
             }
 
-            if (targetVisible && r.top > headerLimit && r.centerX() < leftMessageLimit) {
+            if (r.top > headerLimit && r.centerX() < leftMessageLimit) {
                 String token = usefulIncomingToken(text) ? text : (usefulIncomingToken(desc) ? desc : "");
-                if (!token.isEmpty()) incomingTokens.add(r.top + ":" + token);
+                if (!token.isEmpty()) candidates.add(new MessageToken(r.top, token));
             }
 
             for (int i = 0; i < node.getChildCount(); i++) {
@@ -351,21 +374,54 @@ public class LineReadAccessibilityService extends AccessibilityService {
             }
         }
 
-        int start = Math.max(0, incomingTokens.size() - 12);
+        Collections.sort(candidates, Comparator.comparingInt(t -> t.top));
+        return buildScanResult(targetVisible, readCount, maxReadBottom, candidates);
+    }
+
+    private ScanResult buildScanResult(boolean targetVisible, int readCount, int maxReadBottom, List<MessageToken> tokens) {
+        List<MessageToken> clean = dedupe(tokens);
+        int start = Math.max(0, clean.size() - 12);
         StringBuilder sig = new StringBuilder();
-        for (int i = start; i < incomingTokens.size(); i++) {
+        for (int i = start; i < clean.size(); i++) {
+            MessageToken token = clean.get(i);
             if (sig.length() > 0) sig.append('|');
-            sig.append(incomingTokens.get(i));
+            sig.append(token.top).append(':').append(token.value);
         }
-        return new ScanResult(targetVisible, readCount, maxReadBottom, Integer.toHexString(sig.toString().hashCode()));
+        String preview = clean.isEmpty() ? "" : clean.get(clean.size() - 1).value;
+        return new ScanResult(
+            targetVisible,
+            readCount,
+            maxReadBottom,
+            Integer.toHexString(sig.toString().hashCode()),
+            preview,
+            clean
+        );
+    }
+
+    private List<MessageToken> dedupe(List<MessageToken> values) {
+        List<MessageToken> out = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (MessageToken value : values) {
+            String key = value.top + "\u0000" + value.value;
+            if (seen.add(key)) out.add(value);
+        }
+        return out;
     }
 
     private boolean usefulIncomingToken(String value) {
         if (value == null || value.isEmpty()) return false;
-        if (READ_TEXT.equals(value)) return false;
+        if (isReadLabel(value)) return false;
         if (TIME_LIKE.matcher(value).matches()) return false;
-        if (value.equals("聊天") || value.equals("主頁") || value.equals("VOOM") || value.equals("錢包")) return false;
-        return value.length() <= 300;
+        if (UI_LABELS.contains(value)) return false;
+        if (value.length() > 500) return false;
+        return true;
+    }
+
+    private boolean isReadLabel(String value) {
+        String normalized = normalize(value);
+        if (READ_LABELS.contains(normalized)) return true;
+        String lower = normalized.toLowerCase(Locale.ROOT);
+        return "read".equals(lower);
     }
 
     private boolean matchesTarget(String raw, String target) {
@@ -381,20 +437,11 @@ public class LineReadAccessibilityService extends AccessibilityService {
             .replace('\u00A0', ' ').trim();
     }
 
-    private String join(List<String> values) {
-        StringBuilder out = new StringBuilder();
-        for (String value : values) {
-            if (out.length() > 0) out.append('|');
-            out.append(value);
-        }
-        return out.toString();
-    }
-
     private void ensureNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationManager nm = getSystemService(NotificationManager.class);
             NotificationChannel channel = new NotificationChannel(CHANNEL_ID, "LINE Radar 事件提醒", NotificationManager.IMPORTANCE_HIGH);
-            channel.setDescription("已讀與聊天室新訊息補抓提醒");
+            channel.setDescription("已讀與聊天室新訊息提醒");
             nm.createNotificationChannel(channel);
         }
     }
@@ -406,20 +453,27 @@ public class LineReadAccessibilityService extends AccessibilityService {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) flags |= PendingIntent.FLAG_IMMUTABLE;
         PendingIntent pi = PendingIntent.getActivity(this, id, intent, flags);
 
-        android.app.Notification.Builder b = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-            ? new android.app.Notification.Builder(this, CHANNEL_ID)
-            : new android.app.Notification.Builder(this);
+        Notification.Builder b = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+            ? new Notification.Builder(this, CHANNEL_ID)
+            : new Notification.Builder(this);
 
         b.setSmallIcon(R.drawable.ic_notify_chat_star)
             .setContentTitle(title)
             .setContentText(text)
+            .setStyle(new Notification.BigTextStyle().bigText(text))
             .setContentIntent(pi)
             .setAutoCancel(true)
-            .setVisibility(android.app.Notification.VISIBILITY_PRIVATE)
-            .setPriority(android.app.Notification.PRIORITY_HIGH);
+            .setVisibility(Notification.VISIBILITY_PRIVATE)
+            .setPriority(Notification.PRIORITY_HIGH);
 
         if (slot.vibrateEnabled) b.setVibrate(new long[]{0, 160, 90, 220});
         nm.notify(7311 + id, b.build());
+    }
+
+    private static Set<String> setOf(String... values) {
+        Set<String> out = new HashSet<>();
+        Collections.addAll(out, values);
+        return out;
     }
 
     private static String formatTime(long ms) {
@@ -430,17 +484,31 @@ public class LineReadAccessibilityService extends AccessibilityService {
         return new SimpleDateFormat("yyyy/MM/dd HH:mm:ss", Locale.TAIWAN).format(new Date(ms));
     }
 
+    private static final class MessageToken {
+        final int top;
+        final String value;
+        MessageToken(int top, String value) {
+            this.top = top;
+            this.value = value == null ? "" : value;
+        }
+    }
+
     private static final class ScanResult {
         final boolean targetVisible;
         final int readCount;
         final int maxReadBottom;
         final String incomingSignature;
+        final String incomingPreview;
+        final List<MessageToken> incomingTokens;
 
-        ScanResult(boolean targetVisible, int readCount, int maxReadBottom, String incomingSignature) {
+        ScanResult(boolean targetVisible, int readCount, int maxReadBottom,
+                   String incomingSignature, String incomingPreview, List<MessageToken> incomingTokens) {
             this.targetVisible = targetVisible;
             this.readCount = readCount;
             this.maxReadBottom = maxReadBottom;
             this.incomingSignature = incomingSignature == null ? "" : incomingSignature;
+            this.incomingPreview = incomingPreview == null ? "" : incomingPreview;
+            this.incomingTokens = incomingTokens == null ? new ArrayList<>() : incomingTokens;
         }
     }
 }
