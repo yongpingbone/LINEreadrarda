@@ -45,3 +45,5 @@ jobs:
           path: LINE-Radar-v0.4.1.apk
           if-no-files-found: error
           retention-days: 14
+
+# v0.4.1: auto-pause background polling while the screen is in use
