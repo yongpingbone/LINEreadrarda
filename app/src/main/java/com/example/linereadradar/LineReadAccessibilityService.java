@@ -14,6 +14,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.util.SparseArray;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
@@ -75,7 +76,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
         if (baselineRequest) {
             prefs.markChecked(requestedSlot, now, "尚未建立基準 · 請再試一次");
             prefs.setGlobalStatus("尚未找到「" + slot.name + "」聊天室");
-            Toast.makeText(this, "沒有找到「" + slot.name + "」聊天室，請再按一次建立基準", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "沒有找到「" + slot.name + "」聊天室，請再試一次", Toast.LENGTH_LONG).show();
         } else {
             prefs.markChecked(requestedSlot, now, "背景檢查找不到聊天室");
             prefs.setGlobalStatus("找不到「" + slot.name + "」，等待下次背景檢查");
@@ -155,7 +156,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
 
         ScanResult scan = scanAvailableLineWindows(slot.name);
         if (scan.targetVisible) {
-            if (baselineRequest) establishBaseline(slot, scan, now);
+            if (!slot.armed || baselineRequest) establishBaseline(slot, scan, now);
             else processSlot(slot, scan, now, true);
             return;
         }
@@ -176,16 +177,24 @@ public class LineReadAccessibilityService extends AccessibilityService {
         prefs.armSlot(slot.index, scan.readCount, scan.maxReadBottom, scan.incomingSignature, now);
         prefs.appendHistory(formatDateTime(now) + "｜" + slot.name + "｜基準已建立");
         prefs.setGlobalStatus(slot.name + " 基準已建立");
-        Toast.makeText(this, "「" + slot.name + "」基準已建立 ✓", Toast.LENGTH_LONG).show();
-        clearRequest(false);
+        Toast.makeText(this, "「" + slot.name + "」基準已自動建立 ✓", Toast.LENGTH_LONG).show();
+        if (requestedSlot >= 0) clearRequest(false);
     }
 
     private void evaluateVisibleMonitoredChat(long now) {
         for (int i = 0; i < Prefs.MAX_SLOTS; i++) {
             Prefs.Slot slot = prefs.slot(i);
-            if (!slot.active() || !slot.armed) continue;
+            if (!slot.active()) continue;
             ScanResult scan = scanAvailableLineWindows(slot.name);
             if (!scan.targetVisible) continue;
+
+            if (!slot.armed) {
+                establishBaseline(slot, scan, now);
+                manualVisibleSlot = slot.index;
+                manualVisibleSince = now;
+                manualLastSeenAt = now;
+                return;
+            }
 
             boolean newVisibleSession = manualVisibleSlot != slot.index
                 || manualLastSeenAt <= 0L
@@ -215,8 +224,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
 
     private void processSlot(Prefs.Slot slot, ScanResult scan, long now, boolean automatedPoll) {
         if (!slot.armed) {
-            prefs.markChecked(slot.index, now, "尚未建立基準");
-            if (automatedPoll) clearRequest(false);
+            establishBaseline(slot, scan, now);
             return;
         }
 
@@ -309,18 +317,39 @@ public class LineReadAccessibilityService extends AccessibilityService {
         int maxReadBottom = -1;
         List<MessageToken> incoming = new ArrayList<>();
 
-        List<AccessibilityWindowInfo> windows = getWindows();
-        if (windows != null) {
-            for (AccessibilityWindowInfo window : windows) {
-                if (window == null) continue;
-                AccessibilityNodeInfo root = window.getRoot();
-                if (!isLineRoot(root)) continue;
-                sawLineWindow = true;
-                ScanResult result = scanTree(root, target);
-                targetVisible |= result.targetVisible;
-                readCount += result.readCount;
-                maxReadBottom = Math.max(maxReadBottom, result.maxReadBottom);
-                incoming.addAll(result.incomingTokens);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            SparseArray<List<AccessibilityWindowInfo>> all = getWindowsOnAllDisplays();
+            if (all != null) {
+                for (int displayIndex = 0; displayIndex < all.size(); displayIndex++) {
+                    List<AccessibilityWindowInfo> windows = all.valueAt(displayIndex);
+                    if (windows == null) continue;
+                    for (AccessibilityWindowInfo window : windows) {
+                        if (window == null) continue;
+                        AccessibilityNodeInfo root = window.getRoot();
+                        if (!isLineRoot(root)) continue;
+                        sawLineWindow = true;
+                        ScanResult result = scanTree(root, target);
+                        targetVisible |= result.targetVisible;
+                        readCount += result.readCount;
+                        maxReadBottom = Math.max(maxReadBottom, result.maxReadBottom);
+                        incoming.addAll(result.incomingTokens);
+                    }
+                }
+            }
+        } else {
+            List<AccessibilityWindowInfo> windows = getWindows();
+            if (windows != null) {
+                for (AccessibilityWindowInfo window : windows) {
+                    if (window == null) continue;
+                    AccessibilityNodeInfo root = window.getRoot();
+                    if (!isLineRoot(root)) continue;
+                    sawLineWindow = true;
+                    ScanResult result = scanTree(root, target);
+                    targetVisible |= result.targetVisible;
+                    readCount += result.readCount;
+                    maxReadBottom = Math.max(maxReadBottom, result.maxReadBottom);
+                    incoming.addAll(result.incomingTokens);
+                }
             }
         }
 
