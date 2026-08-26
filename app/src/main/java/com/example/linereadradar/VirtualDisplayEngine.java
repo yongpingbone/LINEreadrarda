@@ -24,7 +24,7 @@ final class VirtualDisplayEngine {
             DisplayManager dm = (DisplayManager) context.getSystemService(Context.DISPLAY_SERVICE);
             if (dm == null) return Result.fail("DisplayManager unavailable");
 
-            int flags = DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
+            int flags = DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC
                 | DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION;
             virtualDisplay = dm.createVirtualDisplay(
                 "LINE-Radar-NoRead",
@@ -62,6 +62,8 @@ final class VirtualDisplayEngine {
             options.setLaunchDisplayId(displayId);
             activity.startActivity(launch, options.toBundle());
             return Result.ok(displayId, "已要求 LINE 啟動到 Display " + displayId);
+        } catch (SecurityException e) {
+            return Result.fail("Android 不允許目前這個 Virtual Display 啟動 LINE。已改用 PUBLIC Display，但仍需實機支援：" + safe(e.getMessage()));
         } catch (Throwable t) {
             return Result.fail(t.getClass().getSimpleName() + ": " + safe(t.getMessage()));
         }
