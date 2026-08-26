@@ -22,6 +22,7 @@ public class ProjectionForegroundService extends Service {
 
     private Prefs prefs;
     private PowerManager.WakeLock wakeLock;
+    private boolean displaySetupInProgress = false;
     private final Handler handler = new Handler(Looper.getMainLooper());
 
     private final Runnable healthCheck = new Runnable() {
@@ -41,7 +42,9 @@ public class ProjectionForegroundService extends Service {
                 return;
             }
 
-            if (!VirtualDisplayEngine.alive()) createDisplayAndLaunchLine();
+            if (!VirtualDisplayEngine.alive() && !displaySetupInProgress) {
+                createDisplayAndLaunchLine();
+            }
             updateNotification();
             handler.postDelayed(this, HEALTH_CHECK_MS);
         }
@@ -82,7 +85,7 @@ public class ProjectionForegroundService extends Service {
             VirtualDisplayEngine.setExternalStatus("Shizuku 尚未啟動 · 請先用無線偵錯啟動 Shizuku");
         } else if (!ShizukuBridge.permissionGranted()) {
             VirtualDisplayEngine.setExternalStatus("Shizuku 已啟動 · 等待 Radar 授權");
-        } else if (!VirtualDisplayEngine.alive()) {
+        } else if (!VirtualDisplayEngine.alive() && !displaySetupInProgress) {
             createDisplayAndLaunchLine();
         }
 
@@ -93,31 +96,39 @@ public class ProjectionForegroundService extends Service {
     }
 
     private void createDisplayAndLaunchLine() {
-        if (VirtualDisplayEngine.alive()) return;
+        if (VirtualDisplayEngine.alive() || displaySetupInProgress) return;
+        displaySetupInProgress = true;
 
         VirtualDisplayEngine.Result display = VirtualDisplayEngine.create(this);
         if (!display.success) {
+            displaySetupInProgress = false;
             prefs.setVirtualDisplayStopped(display.message);
             prefs.setGlobalStatus("第二畫面建立失敗");
+            updateNotification();
             return;
         }
 
-        VirtualDisplayEngine.Result launch = VirtualDisplayEngine.launchLine(this);
-        if (!launch.success) {
-            prefs.setVirtualDisplayRunning(display.displayId, launch.message);
-            prefs.setGlobalStatus("第二畫面已建立 · LINE 尚未進入");
-            return;
-        }
+        VirtualDisplayEngine.launchLine(this, launch -> {
+            displaySetupInProgress = false;
+            if (!launch.success) {
+                prefs.setVirtualDisplayRunning(display.displayId, launch.message);
+                prefs.setGlobalStatus("第二畫面已建立 · LINE 尚未進入");
+                updateNotification();
+                return;
+            }
 
-        prefs.setVirtualDisplayRunning(display.displayId,
-            "第二畫面運作中 · Display " + display.displayId + " · 等待 Accessibility 驗證 LINE");
-        prefs.setGlobalStatus("第二畫面持續監控中 · Display " + display.displayId);
-        MonitorForegroundService.stop(this);
+            prefs.setVirtualDisplayRunning(display.displayId,
+                "第二畫面運作中 · Display " + display.displayId + " · 等待 Accessibility 驗證 LINE");
+            prefs.setGlobalStatus("第二畫面持續監控中 · Display " + display.displayId);
+            MonitorForegroundService.stop(this);
+            updateNotification();
+        });
     }
 
     @Override
     public void onDestroy() {
         handler.removeCallbacks(healthCheck);
+        displaySetupInProgress = false;
         VirtualDisplayEngine.release();
         releaseWakeLock();
         super.onDestroy();
@@ -170,6 +181,7 @@ public class ProjectionForegroundService extends Service {
 
         if (!ShizukuBridge.binderReady()) text = "Shizuku 未啟動 · 監控暫停";
         else if (!ShizukuBridge.permissionGranted()) text = "等待 Shizuku 授權";
+        else if (displaySetupInProgress) text = "正在建立第二畫面並啟動 LINE";
         else if (id < 0) text = "正在建立第二畫面";
         else if (lineVerified) text = "Display " + id + " · LINE 已驗證 · 背景持續監控";
         else text = "Display " + id + " · 等待 LINE 驗證";
