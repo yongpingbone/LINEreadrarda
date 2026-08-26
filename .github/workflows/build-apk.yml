@@ -36,12 +36,12 @@ jobs:
         run: gradle --no-daemon clean testDebugUnitTest assembleDebug
 
       - name: Rename APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk LINE-Radar-v0.6.16-Shizuku.apk
+        run: cp app/build/outputs/apk/debug/app-debug.apk LINE-Radar-v0.6.17-Shizuku.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: LINE-Radar-v0.6.16-Shizuku
-          path: LINE-Radar-v0.6.16-Shizuku.apk
+          name: LINE-Radar-v0.6.17-Shizuku
+          path: LINE-Radar-v0.6.17-Shizuku.apk
           if-no-files-found: error
           retention-days: 14
