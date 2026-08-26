@@ -7,48 +7,80 @@ import android.content.Intent;
 import android.graphics.PixelFormat;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
+import android.media.Image;
 import android.media.ImageReader;
+import android.media.projection.MediaProjection;
 import android.os.Build;
+import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.Looper;
 
 final class VirtualDisplayEngine {
     private static ImageReader imageReader;
     private static VirtualDisplay virtualDisplay;
+    private static MediaProjection mediaProjection;
+    private static HandlerThread drainThread;
+    private static Handler drainHandler;
+    private static volatile String status = "尚未建立第二畫面";
 
-    static synchronized Result create(Context context) {
+    static synchronized Result createWithProjection(Context context, MediaProjection projection) {
         release();
+        if (projection == null) return failAndStore("沒有 MediaProjection 授權");
         try {
             int width = 720;
             int height = 1280;
             int density = Math.max(240, context.getResources().getDisplayMetrics().densityDpi);
-            imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2);
-            DisplayManager dm = (DisplayManager) context.getSystemService(Context.DISPLAY_SERVICE);
-            if (dm == null) return Result.fail("DisplayManager unavailable");
+
+            mediaProjection = projection;
+            mediaProjection.registerCallback(new MediaProjection.Callback() {
+                @Override
+                public void onStop() {
+                    synchronized (VirtualDisplayEngine.class) {
+                        releaseDisplayResources();
+                        mediaProjection = null;
+                        status = "Android 已停止螢幕分享授權";
+                    }
+                }
+            }, new Handler(Looper.getMainLooper()));
+
+            drainThread = new HandlerThread("RadarDisplayDrain");
+            drainThread.start();
+            drainHandler = new Handler(drainThread.getLooper());
+            imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3);
+            imageReader.setOnImageAvailableListener(reader -> {
+                Image image = null;
+                try { image = reader.acquireLatestImage(); }
+                catch (Throwable ignored) {}
+                finally { if (image != null) image.close(); }
+            }, drainHandler);
 
             int flags = DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC
                 | DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION;
-            virtualDisplay = dm.createVirtualDisplay(
+            virtualDisplay = mediaProjection.createVirtualDisplay(
                 "LINE-Radar-NoRead",
                 width,
                 height,
                 density,
+                flags,
                 imageReader.getSurface(),
-                flags
+                null,
+                null
             );
+
             if (virtualDisplay == null || virtualDisplay.getDisplay() == null) {
-                release();
-                return Result.fail("createVirtualDisplay returned null");
+                return failAndRelease("MediaProjection 建立 Virtual Display 失敗");
             }
-            return Result.ok(virtualDisplay.getDisplay().getDisplayId(),
-                "Virtual Display ready: " + virtualDisplay.getDisplay().getDisplayId());
+            int id = virtualDisplay.getDisplay().getDisplayId();
+            status = "第二畫面已建立 · Display " + id;
+            return Result.ok(id, status);
         } catch (Throwable t) {
-            release();
-            return Result.fail(t.getClass().getSimpleName() + ": " + safe(t.getMessage()));
+            return failAndRelease(t.getClass().getSimpleName() + ": " + safe(t.getMessage()));
         }
     }
 
     static synchronized Result launchLine(Activity activity) {
         if (virtualDisplay == null || virtualDisplay.getDisplay() == null) {
-            return Result.fail("請先建立 Virtual Display");
+            return Result.fail("請先取得螢幕分享授權並建立第二畫面");
         }
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
             return Result.fail("Android 8.0 以下不支援 setLaunchDisplayId");
@@ -61,11 +93,14 @@ final class VirtualDisplayEngine {
             ActivityOptions options = ActivityOptions.makeBasic();
             options.setLaunchDisplayId(displayId);
             activity.startActivity(launch, options.toBundle());
-            return Result.ok(displayId, "已要求 LINE 啟動到 Display " + displayId);
+            status = "已要求 LINE 啟動到 Display " + displayId;
+            return Result.ok(displayId, status);
         } catch (SecurityException e) {
-            return Result.fail("Android 不允許目前這個 Virtual Display 啟動 LINE。已改用 PUBLIC Display，但仍需實機支援：" + safe(e.getMessage()));
+            status = "第二畫面已建立，但 Android 不允許 LINE 在這個 Display 啟動：" + safe(e.getMessage());
+            return Result.fail(status);
         } catch (Throwable t) {
-            return Result.fail(t.getClass().getSimpleName() + ": " + safe(t.getMessage()));
+            status = t.getClass().getSimpleName() + ": " + safe(t.getMessage());
+            return Result.fail(status);
         }
     }
 
@@ -74,11 +109,23 @@ final class VirtualDisplayEngine {
             ? -1 : virtualDisplay.getDisplay().getDisplayId();
     }
 
-    static synchronized boolean alive() {
-        return displayId() >= 0;
+    static String status() { return status; }
+
+    static void setExternalStatus(String value) {
+        status = value == null ? "未知狀態" : value;
     }
 
     static synchronized void release() {
+        MediaProjection projection = mediaProjection;
+        mediaProjection = null;
+        releaseDisplayResources();
+        if (projection != null) {
+            try { projection.stop(); } catch (Throwable ignored) {}
+        }
+        status = "第二畫面已關閉";
+    }
+
+    private static void releaseDisplayResources() {
         if (virtualDisplay != null) {
             try { virtualDisplay.release(); } catch (Throwable ignored) {}
             virtualDisplay = null;
@@ -87,6 +134,27 @@ final class VirtualDisplayEngine {
             try { imageReader.close(); } catch (Throwable ignored) {}
             imageReader = null;
         }
+        if (drainThread != null) {
+            try { drainThread.quitSafely(); } catch (Throwable ignored) {}
+            drainThread = null;
+            drainHandler = null;
+        }
+    }
+
+    private static Result failAndStore(String message) {
+        status = message;
+        return Result.fail(message);
+    }
+
+    private static Result failAndRelease(String message) {
+        status = message;
+        MediaProjection projection = mediaProjection;
+        mediaProjection = null;
+        releaseDisplayResources();
+        if (projection != null) {
+            try { projection.stop(); } catch (Throwable ignored) {}
+        }
+        return Result.fail(message);
     }
 
     private static String safe(String value) {
