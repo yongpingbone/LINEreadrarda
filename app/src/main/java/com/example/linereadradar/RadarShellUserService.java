@@ -15,6 +15,8 @@ import androidx.annotation.Keep;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.List;
 
 public class RadarShellUserService extends IRadarShellService.Stub {
@@ -214,16 +216,28 @@ public class RadarShellUserService extends IRadarShellService.Stub {
             List<ActivityManager.RunningTaskInfo> tasks = am.getRunningTasks(100);
             if (tasks == null) return "ERR:3\nno running task list";
 
+            boolean sawLineTaskWithoutDisplayId = false;
             for (ActivityManager.RunningTaskInfo task : tasks) {
-                if (task == null || task.id <= 0 || task.displayId != displayId) continue;
+                if (task == null || task.id <= 0) continue;
                 ComponentName top = task.topActivity;
                 ComponentName base = task.baseActivity;
                 boolean matches = (top != null && LINE_PACKAGE.equals(top.getPackageName()))
                     || (base != null && LINE_PACKAGE.equals(base.getPackageName()));
                 if (!matches) continue;
 
+                int taskDisplayId = resolveTaskDisplayId(task);
+                if (taskDisplayId < 0) {
+                    sawLineTaskWithoutDisplayId = true;
+                    continue;
+                }
+                if (taskDisplayId != displayId) continue;
+
                 am.moveTaskToFront(task.id, ActivityManager.MOVE_TASK_NO_USER_ACTION);
                 return "OK\ntask " + task.id + " moved to front on Display " + displayId;
+            }
+
+            if (sawLineTaskWithoutDisplayId) {
+                return "ERR:6\nLINE task found but Android hid its display id";
             }
             return "ERR:4\nLINE task not found on Display " + displayId;
         } catch (SecurityException se) {
@@ -231,6 +245,30 @@ public class RadarShellUserService extends IRadarShellService.Stub {
         } catch (Throwable t) {
             return "ERR:1\n" + t.getClass().getSimpleName() + ": " + safe(t.getMessage());
         }
+    }
+
+    private int resolveTaskDisplayId(ActivityManager.RunningTaskInfo task) {
+        if (task == null) return -1;
+
+        try {
+            Method method = task.getClass().getMethod("getDisplayId");
+            Object value = method.invoke(task);
+            if (value instanceof Number) return ((Number) value).intValue();
+        } catch (Throwable ignored) {}
+
+        Class<?> type = task.getClass();
+        while (type != null) {
+            try {
+                Field field = type.getDeclaredField("displayId");
+                field.setAccessible(true);
+                return field.getInt(task);
+            } catch (NoSuchFieldException notHere) {
+                type = type.getSuperclass();
+            } catch (Throwable blocked) {
+                return -1;
+            }
+        }
+        return -1;
     }
 
     private Context shellContext() throws Exception {
