@@ -16,7 +16,7 @@ import android.os.PowerManager;
 
 public class ProjectionForegroundService extends Service {
     private static final String ACTION_START = "com.example.linereadradar.START_SHIZUKU_DISPLAY";
-    private static final String CHANNEL_ID = "line_radar_shizuku_display_v067";
+    private static final String CHANNEL_ID = "line_radar_shizuku_display_v068";
     private static final int NOTIFICATION_ID = 7355;
     private static final long HEALTH_CHECK_MS = 2500L;
     private static final long LINE_RETRY_MS = 4500L;
@@ -121,21 +121,27 @@ public class ProjectionForegroundService extends Service {
 
             // Recovery actions are intentionally gated by Display/Shizuku/background
             // health, not by Accessibility. Their purpose is to recover when
-            // Accessibility has stopped seeing LINE, so using isLineVerified() here
-            // would create a circular dependency and disable the rescue path exactly
-            // when it is needed.
+            // Accessibility has stopped seeing LINE.
             if (shouldRunRecovery(id)) {
                 pulseLineTask(id);
                 maybeHardRefreshMonitoredChat(id);
             }
 
-            if (isLineVerified(id)) {
+            boolean lineVerified = isLineVerified(id);
+            boolean targetReady = hasRecentTargetChat(id);
+
+            if (lineVerified && targetReady) {
                 prefs.updateVirtualDisplayStatus(
-                    "Display " + id + " · LINE root 正常 · 背景＋息屏監控就緒");
+                    "Display " + id + " · 目標聊天室已定位 · 背景＋息屏監控就緒");
                 prefs.setGlobalStatus("背景＋息屏持續監控中 · Display " + id);
+            } else if (lineVerified) {
+                prefs.updateVirtualDisplayStatus(
+                    "Display " + id + " · LINE 已驗證 · 尚未定位到監控聊天室");
+                prefs.setGlobalStatus("LINE 已驗證 · 正在定位監控聊天室");
             } else {
                 prefs.updateVirtualDisplayStatus(
                     "Display " + id + " · LINE root 超過 15 秒未回報 · 自我修復中");
+                prefs.setGlobalStatus("第二畫面自我修復中 · Display " + id);
                 long now = System.currentTimeMillis();
                 if (!lineLaunchInProgress && now - lastLineLaunchAttemptAt >= LINE_RETRY_MS) {
                     retryLineLaunch();
@@ -156,6 +162,10 @@ public class ProjectionForegroundService extends Service {
             && ShizukuBridge.permissionGranted();
     }
 
+    private boolean hasRecentTargetChat(int id) {
+        return health.hasRecentBackgroundTarget(prefs, id, System.currentTimeMillis());
+    }
+
     private void pulseLineTask(int id) {
         long now = System.currentTimeMillis();
         if (id <= 0 || linePulseInProgress || secondaryPollInProgress || lineLaunchInProgress
@@ -168,7 +178,11 @@ public class ProjectionForegroundService extends Service {
             if (pulse.success) {
                 long successAt = System.currentTimeMillis();
                 health.markPulseSuccess(id, successAt);
-                prefs.setGlobalStatus("背景持續監控中 · Display " + id + " · LINE task heartbeat 成功");
+                if (hasRecentTargetChat(id)) {
+                    prefs.setGlobalStatus("背景持續監控中 · Display " + id + " · LINE task 活躍");
+                } else {
+                    prefs.setGlobalStatus("LINE task 活躍 · 正在定位監控聊天室");
+                }
                 return;
             }
 
@@ -212,7 +226,7 @@ public class ProjectionForegroundService extends Service {
                 command.putExtra(MonitorForegroundService.EXTRA_SLOT, slot);
                 sendBroadcast(command);
                 health.markHardRefresh(id, refreshAt);
-                prefs.setGlobalStatus("第二畫面重新對準「" + target.name + "」");
+                prefs.setGlobalStatus("第二畫面正在尋找「" + target.name + "」");
                 secondaryPollInProgress = false;
             }, POLL_OPEN_DELAY_MS);
         });
@@ -232,10 +246,6 @@ public class ProjectionForegroundService extends Service {
                 return;
             }
 
-            // A newly created Display is a new monitoring session even if Android
-            // happens to reuse the same numeric display id. Reset per-display
-            // calibration/diagnostic state so the first target scan is a clean
-            // secondary baseline instead of a false event.
             health.resetForNewDisplay(display.displayId);
 
             lastLineLaunchAttemptAt = System.currentTimeMillis();
@@ -329,7 +339,7 @@ public class ProjectionForegroundService extends Service {
                 "背景與息屏監控",
                 NotificationManager.IMPORTANCE_MIN
             );
-            channel.setDescription("維持 Shizuku 第二 Display、獨立 LINE task heartbeat 與重新對準");
+            channel.setDescription("維持 Shizuku 第二 Display、LINE task heartbeat、聊天室尋路與重新對準");
             nm.createNotificationChannel(channel);
         }
     }
@@ -343,6 +353,7 @@ public class ProjectionForegroundService extends Service {
         String text;
         int id = VirtualDisplayEngine.displayId();
         boolean lineVerified = isLineVerified(id);
+        boolean targetReady = hasRecentTargetChat(id);
 
         if (!ShizukuBridge.binderReady()) text = "Shizuku 未啟動 · 監控暫停";
         else if (!ShizukuBridge.permissionGranted()) text = "等待 Shizuku 授權";
@@ -352,7 +363,8 @@ public class ProjectionForegroundService extends Service {
         else if (lineLaunchInProgress) text = "Display " + id + " · 正在把 LINE 拉回第二畫面";
         else if (linePulseInProgress) text = "Display " + id + " · LINE task heartbeat";
         else if (id < 0) text = "正在建立第二畫面";
-        else if (lineVerified) text = "Display " + id + " · LINE root 正常 · 背景＋息屏監控";
+        else if (lineVerified && targetReady) text = "Display " + id + " · 目標聊天室已定位 · 背景＋息屏監控";
+        else if (lineVerified) text = "Display " + id + " · LINE 已驗證 · 正在定位監控聊天室";
         else if (shouldRunRecovery(id)) text = "Display " + id + " · LINE root 未回報 · 自我修復中";
         else text = prefs.virtualDisplayStatus();
 
