@@ -23,8 +23,6 @@ public class RadarShellUserService extends IRadarShellService.Stub {
     private static final String LINE_PACKAGE = "jp.naver.line.android";
     private static final String SHELL_PACKAGE = "com.android.shell";
 
-    // Hidden DisplayManager flags. Values are stable platform constants on the
-    // Android versions supported by this experiment.
     private static final int FLAG_SUPPORTS_TOUCH = 1 << 6;
     private static final int FLAG_TRUSTED = 1 << 10;
     private static final int FLAG_OWN_DISPLAY_GROUP = 1 << 11;
@@ -38,6 +36,8 @@ public class RadarShellUserService extends IRadarShellService.Stub {
     private HandlerThread drainThread;
     private Handler drainHandler;
     private volatile String displayStatus = "Shizuku 第二畫面尚未建立";
+    private volatile int virtualWidth = 720;
+    private volatile int virtualHeight = 1280;
 
     public RadarShellUserService() {}
 
@@ -107,6 +107,8 @@ public class RadarShellUserService extends IRadarShellService.Stub {
                     imageReader.getSurface(),
                     flags
                 );
+                virtualWidth = safeWidth;
+                virtualHeight = safeHeight;
 
                 int id = currentDisplayIdLocked();
                 if (id <= 0) {
@@ -153,15 +155,8 @@ public class RadarShellUserService extends IRadarShellService.Stub {
         if (componentName == null || !componentName.startsWith(packageName + "/")) {
             return "ERR:2\ninvalid component";
         }
-        if (displayId <= 0) return "ERR:2\ninvalid display";
-
-        synchronized (displayLock) {
-            int currentId = currentDisplayIdLocked();
-            if (currentId <= 0 || currentId != displayId) {
-                return "ERR:2\nShizuku display is not alive: expected " + displayId
-                    + ", current " + currentId;
-            }
-        }
+        String displayError = validateDisplay(displayId);
+        if (displayError != null) return displayError;
 
         Process process = null;
         try {
@@ -174,15 +169,7 @@ public class RadarShellUserService extends IRadarShellService.Stub {
                 "-n", componentName
             ).redirectErrorStream(true).start();
 
-            StringBuilder out = new StringBuilder();
-            BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
-            String line;
-            while ((line = reader.readLine()) != null) {
-                if (out.length() > 0) out.append('\n');
-                out.append(line);
-                if (out.length() > 4000) break;
-            }
-
+            StringBuilder out = readOutput(process);
             int code = process.waitFor();
             if (code == 0) return "OK\n" + out;
             return "ERR:" + code + "\n" + out;
@@ -198,15 +185,8 @@ public class RadarShellUserService extends IRadarShellService.Stub {
     @Override
     public String pulseAppTaskOnDisplay(String packageName, int displayId) {
         if (!LINE_PACKAGE.equals(packageName)) return "ERR:2\npackage not allowed";
-        if (displayId <= 0) return "ERR:2\ninvalid display";
-
-        synchronized (displayLock) {
-            int currentId = currentDisplayIdLocked();
-            if (currentId <= 0 || currentId != displayId) {
-                return "ERR:2\nShizuku display is not alive: expected " + displayId
-                    + ", current " + currentId;
-            }
-        }
+        String displayError = validateDisplay(displayId);
+        if (displayError != null) return displayError;
 
         try {
             Context shellContext = shellContext();
@@ -245,6 +225,93 @@ public class RadarShellUserService extends IRadarShellService.Stub {
         } catch (Throwable t) {
             return "ERR:1\n" + t.getClass().getSimpleName() + ": " + safe(t.getMessage());
         }
+    }
+
+    @Override
+    public String inputTapOnDisplay(int displayId, int x, int y) {
+        String displayError = validateDisplay(displayId);
+        if (displayError != null) return displayError;
+        if (!validPoint(x, y)) return "ERR:2\ninvalid tap coordinates";
+        return runInput("tap", displayId,
+            String.valueOf(x), String.valueOf(y));
+    }
+
+    @Override
+    public String inputSwipeOnDisplay(int displayId, int startX, int startY,
+                                      int endX, int endY, int durationMs) {
+        String displayError = validateDisplay(displayId);
+        if (displayError != null) return displayError;
+        if (!validPoint(startX, startY) || !validPoint(endX, endY)) {
+            return "ERR:2\ninvalid swipe coordinates";
+        }
+        int duration = Math.max(80, Math.min(1800, durationMs));
+        return runInput("swipe", displayId,
+            String.valueOf(startX), String.valueOf(startY),
+            String.valueOf(endX), String.valueOf(endY),
+            String.valueOf(duration));
+    }
+
+    @Override
+    public String inputBackOnDisplay(int displayId) {
+        String displayError = validateDisplay(displayId);
+        if (displayError != null) return displayError;
+        return runInput("keyevent", displayId, "BACK");
+    }
+
+    private String runInput(String command, int displayId, String... args) {
+        Process process = null;
+        try {
+            String[] cmd = new String[4 + args.length];
+            cmd[0] = "input";
+            cmd[1] = "-d";
+            cmd[2] = String.valueOf(displayId);
+            cmd[3] = command;
+            System.arraycopy(args, 0, cmd, 4, args.length);
+            process = new ProcessBuilder(cmd).redirectErrorStream(true).start();
+            StringBuilder out = readOutput(process);
+            int code = process.waitFor();
+            if (code == 0) {
+                return "OK\ninput -d " + displayId + " " + command
+                    + (out.length() == 0 ? "" : "\n" + out);
+            }
+            return "ERR:" + code + "\n" + out;
+        } catch (Throwable t) {
+            return "ERR:1\n" + t.getClass().getSimpleName() + ": " + safe(t.getMessage());
+        } finally {
+            if (process != null) {
+                try { process.destroy(); } catch (Throwable ignored) {}
+            }
+        }
+    }
+
+    private String validateDisplay(int displayId) {
+        if (displayId <= 0) return "ERR:2\ninvalid display";
+        synchronized (displayLock) {
+            int currentId = currentDisplayIdLocked();
+            if (currentId <= 0 || currentId != displayId) {
+                return "ERR:2\nShizuku display is not alive: expected " + displayId
+                    + ", current " + currentId;
+            }
+        }
+        return null;
+    }
+
+    private boolean validPoint(int x, int y) {
+        int width = Math.max(1, virtualWidth);
+        int height = Math.max(1, virtualHeight);
+        return x >= 0 && y >= 0 && x < width && y < height;
+    }
+
+    private StringBuilder readOutput(Process process) throws Exception {
+        StringBuilder out = new StringBuilder();
+        BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+        String line;
+        while ((line = reader.readLine()) != null) {
+            if (out.length() > 0) out.append('\n');
+            out.append(line);
+            if (out.length() > 4000) break;
+        }
+        return out;
     }
 
     private int resolveTaskDisplayId(ActivityManager.RunningTaskInfo task) {
@@ -306,6 +373,8 @@ public class RadarShellUserService extends IRadarShellService.Stub {
             drainThread = null;
             drainHandler = null;
         }
+        virtualWidth = 720;
+        virtualHeight = 1280;
     }
 
     private static String safe(String value) {
