@@ -29,6 +29,8 @@ final class ShizukuBridge {
     private static final int OP_INPUT_TAP = 6;
     private static final int OP_INPUT_SWIPE = 7;
     private static final int OP_INPUT_BACK = 8;
+    private static final int OP_LAUNCH_ISOLATED = 9;
+    private static final int OP_QUERY_TASK_TOPOLOGY = 10;
 
     interface ResultCallback {
         void onResult(Result result);
@@ -68,20 +70,14 @@ final class ShizukuBridge {
     };
 
     static boolean binderReady() {
-        try {
-            return Shizuku.pingBinder();
-        } catch (Throwable ignored) {
-            return false;
-        }
+        try { return Shizuku.pingBinder(); }
+        catch (Throwable ignored) { return false; }
     }
 
     static boolean permissionGranted() {
         if (!binderReady()) return false;
-        try {
-            return Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED;
-        } catch (Throwable ignored) {
-            return false;
-        }
+        try { return Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED; }
+        catch (Throwable ignored) { return false; }
     }
 
     static boolean permissionDeniedPermanently() {
@@ -89,71 +85,58 @@ final class ShizukuBridge {
         try {
             return Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED
                 && Shizuku.shouldShowRequestPermissionRationale();
-        } catch (Throwable ignored) {
-            return false;
-        }
+        } catch (Throwable ignored) { return false; }
     }
 
     static void requestPermission() {
         if (!binderReady()) return;
-        try {
-            Shizuku.requestPermission(REQUEST_CODE);
-        } catch (Throwable ignored) {}
+        try { Shizuku.requestPermission(REQUEST_CODE); }
+        catch (Throwable ignored) {}
     }
 
     static String stateText(Context context) {
         if (!isShizukuInstalled(context)) return "未安裝 Shizuku";
         if (!binderReady()) return "Shizuku 尚未啟動";
         if (!permissionGranted()) return permissionDeniedPermanently()
-            ? "Shizuku 權限已被拒絕"
-            : "等待 Radar 的 Shizuku 授權";
+            ? "Shizuku 權限已被拒絕" : "等待 Radar 的 Shizuku 授權";
         try {
             int uid = Shizuku.getUid();
-            return uid == 2000
-                ? "Shizuku 已連線 · Wireless debugging / shell"
+            return uid == 2000 ? "Shizuku 已連線 · Wireless debugging / shell"
                 : "Shizuku 已連線 · UID " + uid;
-        } catch (Throwable ignored) {
-            return "Shizuku 已連線";
-        }
+        } catch (Throwable ignored) { return "Shizuku 已連線"; }
     }
 
     static boolean isShizukuInstalled(Context context) {
         try {
             context.getPackageManager().getPackageInfo(SHIZUKU_PACKAGE, 0);
             return true;
-        } catch (Throwable ignored) {
-            return false;
-        }
+        } catch (Throwable ignored) { return false; }
     }
 
     static void ensureVirtualDisplay(Context context, int width, int height, int densityDpi,
                                      ResultCallback callback) {
-        if (!permissionGranted()) {
-            post(callback, Result.fail("Shizuku 尚未取得授權"));
-            return;
-        }
+        if (!permissionGranted()) { post(callback, Result.fail("Shizuku 尚未取得授權")); return; }
         submit(PendingRequest.ensureDisplay(width, height, densityDpi, callback));
     }
 
     static void queryVirtualDisplay(ResultCallback callback) {
-        if (!permissionGranted()) {
-            post(callback, Result.fail("Shizuku 尚未取得授權"));
-            return;
-        }
+        if (!permissionGranted()) { post(callback, Result.fail("Shizuku 尚未取得授權")); return; }
         submit(PendingRequest.queryDisplay(callback));
     }
 
     static void releaseVirtualDisplay(ResultCallback callback) {
-        if (!permissionGranted()) {
-            post(callback, Result.fail("Shizuku 尚未取得授權"));
-            return;
-        }
+        if (!permissionGranted()) { post(callback, Result.fail("Shizuku 尚未取得授權")); return; }
         submit(PendingRequest.releaseDisplay(callback));
     }
 
     static void pulseLineOnDisplay(int displayId, ResultCallback callback) {
         if (!validateInputReady(displayId, callback)) return;
         submit(PendingRequest.pulseLine(displayId, callback));
+    }
+
+    static void queryLineTaskTopology(int displayId, ResultCallback callback) {
+        if (!validateInputReady(displayId, callback)) return;
+        submit(PendingRequest.queryTaskTopology(displayId, callback));
     }
 
     static void tapOnDisplay(int displayId, int x, int y, ResultCallback callback) {
@@ -174,34 +157,19 @@ final class ShizukuBridge {
     }
 
     private static boolean validateInputReady(int displayId, ResultCallback callback) {
-        if (!permissionGranted()) {
-            post(callback, Result.fail("Shizuku 尚未取得授權"));
-            return false;
-        }
-        if (displayId <= 0) {
-            post(callback, Result.fail("無效的第二 Display"));
-            return false;
-        }
+        if (!permissionGranted()) { post(callback, Result.fail("Shizuku 尚未取得授權")); return false; }
+        if (displayId <= 0) { post(callback, Result.fail("無效的第二 Display")); return false; }
         return true;
     }
 
     static void launchLineOnDisplay(Context context, int displayId, ResultCallback callback) {
-        if (!permissionGranted()) {
-            post(callback, Result.fail("Shizuku 尚未取得授權"));
-            return;
-        }
-        if (displayId <= 0) {
-            post(callback, Result.fail("無效的第二 Display"));
-            return;
-        }
-
+        if (!validateInputReady(displayId, callback)) return;
         Intent launch = context.getPackageManager().getLaunchIntentForPackage(LINE_PACKAGE);
         if (launch == null || launch.getComponent() == null) {
             post(callback, Result.fail("找不到 LINE 啟動 Activity"));
             return;
         }
-
-        submit(PendingRequest.launch(
+        submit(PendingRequest.launchIsolated(
             LINE_PACKAGE,
             launch.getComponent().flattenToShortString(),
             displayId,
@@ -210,19 +178,9 @@ final class ShizukuBridge {
     }
 
     static void launchNoReadShieldOnDisplay(int displayId, ResultCallback callback) {
-        if (!permissionGranted()) {
-            post(callback, Result.fail("Shizuku 尚未取得授權"));
-            return;
-        }
-        if (displayId <= 0) {
-            post(callback, Result.fail("無效的第二 Display"));
-            return;
-        }
+        if (!validateInputReady(displayId, callback)) return;
         submit(PendingRequest.launch(
-            RADAR_PACKAGE,
-            RADAR_SHIELD_COMPONENT,
-            displayId,
-            callback
+            RADAR_PACKAGE, RADAR_SHIELD_COMPONENT, displayId, callback
         ));
     }
 
@@ -235,9 +193,8 @@ final class ShizukuBridge {
                 PENDING.add(request);
                 if (!binding) {
                     binding = true;
-                    try {
-                        Shizuku.bindUserService(USER_SERVICE_ARGS, USER_SERVICE_CONNECTION);
-                    } catch (Throwable t) {
+                    try { Shizuku.bindUserService(USER_SERVICE_ARGS, USER_SERVICE_CONNECTION); }
+                    catch (Throwable t) {
                         binding = false;
                         failPending(t.getClass().getSimpleName() + ": " + safe(t.getMessage()));
                     }
@@ -271,64 +228,53 @@ final class ShizukuBridge {
                 Result result;
                 switch (request.operation) {
                     case OP_ENSURE_DISPLAY: {
-                        int id = service.ensureVirtualDisplay(
-                            request.width, request.height, request.densityDpi);
+                        int id = service.ensureVirtualDisplay(request.width, request.height, request.densityDpi);
                         String detail = safeStatus(service.getVirtualDisplayStatus());
-                        result = id > 0
-                            ? Result.ok(id, detail)
+                        result = id > 0 ? Result.ok(id, detail)
                             : Result.fail(detail.isEmpty() ? "Shizuku 建立第二 Display 失敗" : detail);
                         break;
                     }
                     case OP_QUERY_DISPLAY: {
                         int id = service.getVirtualDisplayId();
                         String detail = safeStatus(service.getVirtualDisplayStatus());
-                        result = id > 0
-                            ? Result.ok(id, detail)
+                        result = id > 0 ? Result.ok(id, detail)
                             : Result.fail(detail.isEmpty() ? "Shizuku 第二 Display 不存在" : detail);
                         break;
                     }
-                    case OP_RELEASE_DISPLAY: {
+                    case OP_RELEASE_DISPLAY:
                         service.releaseVirtualDisplay();
                         result = Result.ok(-1, "Shizuku 第二 Display 已釋放");
                         break;
-                    }
-                    case OP_PULSE_LINE: {
+                    case OP_PULSE_LINE:
                         result = parseLaunch(service.pulseAppTaskOnDisplay(LINE_PACKAGE, request.displayId));
                         break;
-                    }
-                    case OP_INPUT_TAP: {
-                        result = parseLaunch(service.inputTapOnDisplay(
-                            request.displayId, request.x1, request.y1));
+                    case OP_QUERY_TASK_TOPOLOGY:
+                        result = parseLaunch(service.getAppTaskTopology(LINE_PACKAGE, request.displayId));
                         break;
-                    }
-                    case OP_INPUT_SWIPE: {
-                        result = parseLaunch(service.inputSwipeOnDisplay(
-                            request.displayId,
-                            request.x1, request.y1,
-                            request.x2, request.y2,
-                            request.durationMs));
+                    case OP_INPUT_TAP:
+                        result = parseLaunch(service.inputTapOnDisplay(request.displayId, request.x1, request.y1));
                         break;
-                    }
-                    case OP_INPUT_BACK: {
+                    case OP_INPUT_SWIPE:
+                        result = parseLaunch(service.inputSwipeOnDisplay(request.displayId,
+                            request.x1, request.y1, request.x2, request.y2, request.durationMs));
+                        break;
+                    case OP_INPUT_BACK:
                         result = parseLaunch(service.inputBackOnDisplay(request.displayId));
                         break;
-                    }
-                    case OP_LAUNCH:
-                    default: {
-                        String raw = service.startActivityOnDisplay(
-                            request.packageName,
-                            request.componentName,
-                            request.displayId
-                        );
-                        result = parseLaunch(raw);
+                    case OP_LAUNCH_ISOLATED:
+                        result = parseLaunch(service.startIsolatedActivityOnDisplay(
+                            request.packageName, request.componentName, request.displayId));
                         break;
-                    }
+                    case OP_LAUNCH:
+                    default:
+                        result = parseLaunch(service.startActivityOnDisplay(
+                            request.packageName, request.componentName, request.displayId));
+                        break;
                 }
                 post(request.callback, result);
             } catch (Throwable t) {
                 synchronized (LOCK) { shellService = null; }
-                post(request.callback,
-                    Result.fail(t.getClass().getSimpleName() + ": " + safe(t.getMessage())));
+                post(request.callback, Result.fail(t.getClass().getSimpleName() + ": " + safe(t.getMessage())));
             }
         }, "RadarShizukuOp").start();
     }
@@ -352,14 +298,10 @@ final class ShizukuBridge {
     }
 
     private static void post(ResultCallback callback, Result result) {
-        if (callback == null) return;
-        MAIN.post(() -> callback.onResult(result));
+        if (callback != null) MAIN.post(() -> callback.onResult(result));
     }
 
-    private static String safeStatus(String value) {
-        return value == null ? "" : value.trim();
-    }
-
+    private static String safeStatus(String value) { return value == null ? "" : value.trim(); }
     private static String safe(String value) {
         return value == null || value.trim().isEmpty() ? "unknown error" : value.trim();
     }
@@ -398,48 +340,35 @@ final class ShizukuBridge {
             this.callback = callback;
         }
 
-        static PendingRequest launch(String pkg, String component, int displayId,
-                                     ResultCallback callback) {
-            return new PendingRequest(OP_LAUNCH, pkg, component, displayId,
-                0, 0, 0, 0, 0, 0, 0, 0, callback);
+        static PendingRequest launch(String pkg, String component, int displayId, ResultCallback callback) {
+            return new PendingRequest(OP_LAUNCH, pkg, component, displayId, 0,0,0,0,0,0,0,0,callback);
         }
-
-        static PendingRequest ensureDisplay(int width, int height, int densityDpi,
-                                            ResultCallback callback) {
-            return new PendingRequest(OP_ENSURE_DISPLAY, null, null, -1,
-                width, height, densityDpi, 0, 0, 0, 0, 0, callback);
+        static PendingRequest launchIsolated(String pkg, String component, int displayId, ResultCallback callback) {
+            return new PendingRequest(OP_LAUNCH_ISOLATED, pkg, component, displayId, 0,0,0,0,0,0,0,0,callback);
         }
-
+        static PendingRequest ensureDisplay(int width, int height, int densityDpi, ResultCallback callback) {
+            return new PendingRequest(OP_ENSURE_DISPLAY, null,null,-1,width,height,densityDpi,0,0,0,0,0,callback);
+        }
         static PendingRequest queryDisplay(ResultCallback callback) {
-            return new PendingRequest(OP_QUERY_DISPLAY, null, null, -1,
-                0, 0, 0, 0, 0, 0, 0, 0, callback);
+            return new PendingRequest(OP_QUERY_DISPLAY, null,null,-1,0,0,0,0,0,0,0,0,callback);
         }
-
         static PendingRequest releaseDisplay(ResultCallback callback) {
-            return new PendingRequest(OP_RELEASE_DISPLAY, null, null, -1,
-                0, 0, 0, 0, 0, 0, 0, 0, callback);
+            return new PendingRequest(OP_RELEASE_DISPLAY, null,null,-1,0,0,0,0,0,0,0,0,callback);
         }
-
         static PendingRequest pulseLine(int displayId, ResultCallback callback) {
-            return new PendingRequest(OP_PULSE_LINE, LINE_PACKAGE, null, displayId,
-                0, 0, 0, 0, 0, 0, 0, 0, callback);
+            return new PendingRequest(OP_PULSE_LINE, LINE_PACKAGE,null,displayId,0,0,0,0,0,0,0,0,callback);
         }
-
+        static PendingRequest queryTaskTopology(int displayId, ResultCallback callback) {
+            return new PendingRequest(OP_QUERY_TASK_TOPOLOGY, LINE_PACKAGE,null,displayId,0,0,0,0,0,0,0,0,callback);
+        }
         static PendingRequest tap(int displayId, int x, int y, ResultCallback callback) {
-            return new PendingRequest(OP_INPUT_TAP, null, null, displayId,
-                0, 0, 0, x, y, 0, 0, 0, callback);
+            return new PendingRequest(OP_INPUT_TAP,null,null,displayId,0,0,0,x,y,0,0,0,callback);
         }
-
-        static PendingRequest swipe(int displayId, int x1, int y1,
-                                    int x2, int y2, int durationMs,
-                                    ResultCallback callback) {
-            return new PendingRequest(OP_INPUT_SWIPE, null, null, displayId,
-                0, 0, 0, x1, y1, x2, y2, durationMs, callback);
+        static PendingRequest swipe(int displayId, int x1, int y1, int x2, int y2, int durationMs, ResultCallback callback) {
+            return new PendingRequest(OP_INPUT_SWIPE,null,null,displayId,0,0,0,x1,y1,x2,y2,durationMs,callback);
         }
-
         static PendingRequest back(int displayId, ResultCallback callback) {
-            return new PendingRequest(OP_INPUT_BACK, null, null, displayId,
-                0, 0, 0, 0, 0, 0, 0, 0, callback);
+            return new PendingRequest(OP_INPUT_BACK,null,null,displayId,0,0,0,0,0,0,0,0,callback);
         }
     }
 
@@ -447,20 +376,13 @@ final class ShizukuBridge {
         final boolean success;
         final String message;
         final int displayId;
-
         private Result(boolean success, String message, int displayId) {
             this.success = success;
             this.message = message == null ? "" : message;
             this.displayId = displayId;
         }
-
-        static Result ok(int displayId, String message) {
-            return new Result(true, message, displayId);
-        }
-
-        static Result fail(String message) {
-            return new Result(false, message, -1);
-        }
+        static Result ok(int displayId, String message) { return new Result(true, message, displayId); }
+        static Result fail(String message) { return new Result(false, message, -1); }
     }
 
     private ShizukuBridge() {}
