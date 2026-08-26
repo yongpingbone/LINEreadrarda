@@ -10,6 +10,11 @@ final class HealthDiagnostics {
     private static final String K_LAST_PULSE_DISPLAY = "last_pulse_display_id";
     private static final String K_LAST_HARD_REFRESH = "last_hard_refresh_at";
     private static final String K_LAST_HARD_REFRESH_DISPLAY = "last_hard_refresh_display_id";
+    private static final String K_LAST_NAV_AT = "last_navigation_at";
+    private static final String K_LAST_NAV_DISPLAY = "last_navigation_display_id";
+    private static final String K_LAST_NAV_ACTION = "last_navigation_action";
+    private static final String K_LAST_NAV_SUCCESS = "last_navigation_success";
+    private static final String K_LAST_NAV_DETAIL = "last_navigation_detail";
 
     private final SharedPreferences p;
 
@@ -27,7 +32,12 @@ final class HealthDiagnostics {
             .remove(K_LAST_PULSE_SUCCESS)
             .remove(K_LAST_PULSE_DISPLAY)
             .remove(K_LAST_HARD_REFRESH)
-            .remove(K_LAST_HARD_REFRESH_DISPLAY);
+            .remove(K_LAST_HARD_REFRESH_DISPLAY)
+            .remove(K_LAST_NAV_AT)
+            .remove(K_LAST_NAV_DISPLAY)
+            .remove(K_LAST_NAV_ACTION)
+            .remove(K_LAST_NAV_SUCCESS)
+            .remove(K_LAST_NAV_DETAIL);
         for (int i = 0; i < Prefs.MAX_SLOTS; i++) {
             e.remove(k(i, "target_seen_at"))
                 .remove(k(i, "target_display_id"))
@@ -71,6 +81,36 @@ final class HealthDiagnostics {
 
     int lastHardRefreshDisplayId() {
         return p.getInt(K_LAST_HARD_REFRESH_DISPLAY, -1);
+    }
+
+    void markNavigation(int displayId, String action, boolean success, String detail, long now) {
+        p.edit()
+            .putLong(K_LAST_NAV_AT, now)
+            .putInt(K_LAST_NAV_DISPLAY, displayId)
+            .putString(K_LAST_NAV_ACTION, action == null ? "" : action)
+            .putBoolean(K_LAST_NAV_SUCCESS, success)
+            .putString(K_LAST_NAV_DETAIL, detail == null ? "" : detail)
+            .apply();
+    }
+
+    long lastNavigationAt() {
+        return p.getLong(K_LAST_NAV_AT, 0L);
+    }
+
+    int lastNavigationDisplayId() {
+        return p.getInt(K_LAST_NAV_DISPLAY, -1);
+    }
+
+    String lastNavigationAction() {
+        return p.getString(K_LAST_NAV_ACTION, "");
+    }
+
+    boolean lastNavigationSuccess() {
+        return p.getBoolean(K_LAST_NAV_SUCCESS, false);
+    }
+
+    String lastNavigationDetail() {
+        return p.getString(K_LAST_NAV_DETAIL, "");
     }
 
     void markTargetChatScan(int slot, int displayId, String treeSignature, long now) {
