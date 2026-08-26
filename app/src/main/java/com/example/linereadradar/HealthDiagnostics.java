@@ -120,4 +120,27 @@ final class HealthDiagnostics {
         if (slot < 0 || slot >= Prefs.MAX_SLOTS || displayId <= 0) return;
         p.edit().putInt(k(slot, "calibrated_display_id"), displayId).apply();
     }
+
+    long targetFreshWindowMs(Prefs prefs) {
+        long poll = prefs == null ? 60000L : prefs.pollIntervalMs();
+        return Math.max(15000L, Math.min(180000L, poll + 15000L));
+    }
+
+    boolean isTargetRecent(int slot, int displayId, long now, Prefs prefs) {
+        if (slot < 0 || slot >= Prefs.MAX_SLOTS || displayId <= 0) return false;
+        long seenAt = targetChatSeenAt(slot);
+        return targetChatDisplayId(slot) == displayId
+            && seenAt > 0L
+            && now - seenAt <= targetFreshWindowMs(prefs);
+    }
+
+    boolean hasRecentBackgroundTarget(Prefs prefs, int displayId, long now) {
+        if (prefs == null || displayId <= 0) return false;
+        for (int i = 0; i < Prefs.MAX_SLOTS; i++) {
+            Prefs.Slot slot = prefs.slot(i);
+            if (!slot.backgroundActive()) continue;
+            if (isTargetRecent(i, displayId, now, prefs)) return true;
+        }
+        return false;
+    }
 }
