@@ -11,6 +11,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.graphics.Rect;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
@@ -40,7 +41,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
     private static final String CHANNEL_ID = "line_read_radar_events_v069";
     private static final long DEBOUNCE_MS = 250L;
     private static final long WATCHDOG_MS = 800L;
-    private static final long REQUEST_TIMEOUT_MS = 18000L;
+    private static final long REQUEST_TIMEOUT_MS = 20000L;
     private static final long MANUAL_SESSION_GAP_MS = 1600L;
     private static final long MANUAL_STABLE_MS = 1000L;
     private static final long SECONDARY_DIAGNOSTIC_MS = 1500L;
@@ -48,10 +49,14 @@ public class LineReadAccessibilityService extends AccessibilityService {
     private static final long NAVIGATION_CALLBACK_TIMEOUT_MS = 3500L;
     private static final long NAVIGATION_CIRCUIT_BREAKER_MS = 60000L;
     private static final long TARGET_OPEN_WAIT_MS = 1800L;
+    private static final long SEARCH_RESULT_WAIT_MS = 1200L;
+    private static final long SEARCH_RESULT_TIMEOUT_MS = 6000L;
     private static final int MAX_BACK_STEPS = 1;
     private static final int MAX_CHAT_TAB_TAP_ATTEMPTS = 1;
-    private static final int MAX_SCROLL_TO_TOP_STEPS = 2;
-    private static final int MAX_SCROLL_FORWARD_STEPS = 4;
+    private static final int MAX_SEARCH_OPEN_ATTEMPTS = 2;
+    private static final int MAX_SEARCH_SET_ATTEMPTS = 2;
+    private static final int MAX_SCROLL_TO_TOP_STEPS = 1;
+    private static final int MAX_SCROLL_FORWARD_STEPS = 2;
     private static final int MAX_NAVIGATION_ACTIONS_PER_REQUEST = 8;
 
     private static final Pattern TIME_LIKE = Pattern.compile(
@@ -70,6 +75,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
         "聊天", "主頁", "首页", "VOOM", "錢包", "钱包",
         "Chats", "Home", "Wallet", "Talk", "ホーム", "トーク", "ウォレット",
         "채팅", "홈", "지갑",
+        "搜尋", "搜索", "Search", "検索", "검색", "搜尋聊天", "搜索聊天", "Search chats",
         "顯示加號選單", "加號選單", "從照片、影片按鈕", "從照片、影片",
         "Open plus menu", "Photos and videos button", "Photos and videos",
         "プラスメニューを表示", "写真・動画ボタン", "사진 및 동영상 버튼"
@@ -87,6 +93,12 @@ public class LineReadAccessibilityService extends AccessibilityService {
     private boolean requestChatsTabOpened = false;
     private int requestChatsTabTapAttempts = 0;
     private int requestBackSteps = 0;
+    private boolean requestSearchOpened = false;
+    private boolean requestSearchQuerySet = false;
+    private boolean requestSearchFallback = false;
+    private int requestSearchOpenAttempts = 0;
+    private int requestSearchSetAttempts = 0;
+    private long requestSearchQueryAt = 0L;
     private int requestScrollToTopSteps = 0;
     private int requestScrollForwardSteps = 0;
     private int requestNavigationActions = 0;
@@ -263,23 +275,13 @@ public class LineReadAccessibilityService extends AccessibilityService {
             return;
         }
 
-        Rect targetBounds = findTargetBounds(root, slot.name);
-        if (targetBounds != null) {
-            sendSecondaryTap(slot, displayId, targetBounds, "TARGET_TAP", now,
-                () -> {
-                    clickedTargetDuringRequest = true;
-                    requestTargetClickAt = System.currentTimeMillis();
-                    prefs.markChecked(slot.index, requestTargetClickAt,
-                        "已找到目標 · 正在進入第二畫面聊天室");
-                });
-            return;
-        }
-
         if (requestNavigationActions >= MAX_NAVIGATION_ACTIONS_PER_REQUEST) {
             openNavigationCircuit(slot, now, "本輪導航已達安全上限");
             return;
         }
 
+        // Step A: first get back to LINE's real Chats root. Do not tap a search icon
+        // from an arbitrary conversation because that would search inside that chat.
         if (!requestChatsTabOpened) {
             Rect chatsBounds = findChatsTabBounds(root);
             if (chatsBounds != null && requestChatsTabTapAttempts < MAX_CHAT_TAB_TAP_ATTEMPTS) {
@@ -287,11 +289,10 @@ public class LineReadAccessibilityService extends AccessibilityService {
                 sendSecondaryTap(slot, displayId, chatsBounds, "CHATS_TAB_TAP", now,
                     () -> {
                         requestChatsTabOpened = true;
-                        requestScrollToTopSteps = 0;
-                        requestScrollForwardSteps = 0;
+                        resetSearchState();
                         long at = System.currentTimeMillis();
                         prefs.markChecked(slot.index, at,
-                            "已切到 LINE 聊天列表 · 正在搜尋「" + slot.name + "」");
+                            "已回到 LINE 聊天分頁 · 準備搜尋「" + slot.name + "」");
                     });
                 return;
             }
@@ -301,25 +302,106 @@ public class LineReadAccessibilityService extends AccessibilityService {
                 return;
             }
 
-            if (chatsBounds != null) {
-                sendSecondaryTap(slot, displayId, chatsBounds, "CHATS_TAB_FINAL_TAP", now,
-                    () -> {
-                        requestChatsTabOpened = true;
-                        requestScrollToTopSteps = 0;
-                        requestScrollForwardSteps = 0;
-                    });
-                return;
-            }
-            requestChatsTabOpened = true;
-            requestScrollToTopSteps = 0;
-            requestScrollForwardSteps = 0;
-            requestLastNavigationAt = now;
-            prefs.markChecked(slot.index, now, "正在掃描目前 LINE 清單 · 尋找「" + slot.name + "」");
+            health.markNavigation(displayId, "CHATS_ROOT_NOT_FOUND", false,
+                summarizeTopControls(root), now);
+            openNavigationCircuit(slot, now, "無法確認 LINE 聊天分頁");
             return;
         }
 
+        // If the target is already visible in the Chats list, open it immediately.
+        if (!requestSearchQuerySet) {
+            Rect directTarget = findListTargetBounds(root, slot.name);
+            if (directTarget != null) {
+                sendSecondaryTap(slot, displayId, directTarget, "TARGET_LIST_TAP", now,
+                    () -> {
+                        clickedTargetDuringRequest = true;
+                        requestTargetClickAt = System.currentTimeMillis();
+                        prefs.markChecked(slot.index, requestTargetClickAt,
+                            "已找到目標 · 正在進入第二畫面聊天室");
+                    });
+                return;
+            }
+        }
+
+        // Step B: once the search query is set, wait for LINE to populate results,
+        // then tap the exact result. The editable search field itself is excluded.
+        if (requestSearchQuerySet) {
+            if (now - requestSearchQueryAt < SEARCH_RESULT_WAIT_MS) return;
+            Rect resultBounds = findSearchResultBounds(root, slot.name);
+            if (resultBounds != null) {
+                sendSecondaryTap(slot, displayId, resultBounds, "SEARCH_RESULT_TAP", now,
+                    () -> {
+                        clickedTargetDuringRequest = true;
+                        requestTargetClickAt = System.currentTimeMillis();
+                        prefs.markChecked(slot.index, requestTargetClickAt,
+                            "搜尋到「" + slot.name + "」· 正在開啟聊天室");
+                    });
+                return;
+            }
+            if (now - requestSearchQueryAt >= SEARCH_RESULT_TIMEOUT_MS) {
+                health.markNavigation(displayId, "SEARCH_RESULT_NOT_FOUND", false,
+                    "query=" + slot.name, now);
+                openNavigationCircuit(slot, now, "LINE 搜尋沒有找到監控聊天室");
+            }
+            return;
+        }
+
+        // Step C: if LINE already shows a search input, use Accessibility ACTION_SET_TEXT.
+        // This does not depend on isVisibleToUser(), which is unreliable on Virtual Displays.
+        AccessibilityNodeInfo searchField = findSearchField(root);
+        if (searchField != null && !requestSearchFallback) {
+            requestSearchOpened = true;
+            if (requestSearchSetAttempts < MAX_SEARCH_SET_ATTEMPTS) {
+                if (setSearchQuery(slot, displayId, searchField, now)) return;
+
+                Rect fieldBounds = boundsOf(searchField);
+                if (fieldBounds != null && requestSearchSetAttempts < MAX_SEARCH_SET_ATTEMPTS) {
+                    sendSecondaryTap(slot, displayId, fieldBounds, "SEARCH_FIELD_TAP", now,
+                        () -> prefs.markChecked(slot.index, System.currentTimeMillis(),
+                            "已聚焦搜尋框 · 正在輸入監控名稱"));
+                    return;
+                }
+            }
+            requestSearchFallback = true;
+            health.markNavigation(displayId, "SEARCH_SET_TEXT_FAILED", false,
+                summarizeTopControls(root), now);
+        }
+
+        // Step D: open LINE's global Chats search, never conversation-internal search.
+        if (!requestSearchOpened && !requestSearchFallback
+            && requestSearchOpenAttempts < MAX_SEARCH_OPEN_ATTEMPTS) {
+            Rect searchBounds = findSearchButtonBounds(root);
+            if (searchBounds != null) {
+                requestSearchOpenAttempts++;
+                sendSecondaryTap(slot, displayId, searchBounds, "SEARCH_OPEN_TAP", now,
+                    () -> {
+                        requestSearchOpened = true;
+                        prefs.markChecked(slot.index, System.currentTimeMillis(),
+                            "已開啟 LINE 搜尋 · 正在輸入「" + slot.name + "」");
+                    });
+                return;
+            }
+
+            requestSearchFallback = true;
+            health.markNavigation(displayId, "SEARCH_CONTROL_NOT_FOUND", false,
+                summarizeTopControls(root), now);
+            prefs.markChecked(slot.index, now,
+                "LINE 沒有暴露搜尋控制項 · 改用有限列表掃描");
+        }
+
+        // Final fallback: a very small bounded list scan. Never loop indefinitely.
         if (requestScrollToTopSteps < MAX_SCROLL_TO_TOP_STEPS) {
             sendSecondarySwipe(slot, displayId, root, true, now);
+            return;
+        }
+
+        Rect fallbackTarget = findListTargetBounds(root, slot.name);
+        if (fallbackTarget != null) {
+            sendSecondaryTap(slot, displayId, fallbackTarget, "FALLBACK_TARGET_TAP", now,
+                () -> {
+                    clickedTargetDuringRequest = true;
+                    requestTargetClickAt = System.currentTimeMillis();
+                });
             return;
         }
 
@@ -328,7 +410,9 @@ public class LineReadAccessibilityService extends AccessibilityService {
             return;
         }
 
-        openNavigationCircuit(slot, now, "已完成安全範圍掃描但尚未看到目標");
+        health.markNavigation(displayId, "TARGET_NOT_FOUND", false,
+            summarizeTopControls(root), now);
+        openNavigationCircuit(slot, now, "搜尋與安全範圍掃描都沒有找到目標");
     }
 
     private void sendSecondaryTap(Prefs.Slot slot, int displayId, Rect bounds,
@@ -362,8 +446,10 @@ public class LineReadAccessibilityService extends AccessibilityService {
             if (!acceptNavigationCallback(serial, slot.index, token, at)) return;
             if (result.success) {
                 requestBackSteps++;
+                requestChatsTabOpened = false;
+                resetSearchState();
                 prefs.markChecked(slot.index, at,
-                    "第二畫面返回上一層 · " + requestBackSteps + "/" + MAX_BACK_STEPS);
+                    "第二畫面返回上一層 · 正在尋找聊天分頁");
             } else {
                 openNavigationCircuit(slot, at, "第二畫面 BACK 失敗");
             }
@@ -402,7 +488,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
                 } else {
                     requestScrollForwardSteps++;
                     prefs.markChecked(slot.index, at,
-                        "聊天列表搜尋中 · " + requestScrollForwardSteps + "/" + MAX_SCROLL_FORWARD_STEPS);
+                        "聊天列表安全搜尋中 · " + requestScrollForwardSteps + "/" + MAX_SCROLL_FORWARD_STEPS);
                 }
             } else {
                 openNavigationCircuit(slot, at, "第二畫面滑動失敗 · " + action);
@@ -444,20 +530,76 @@ public class LineReadAccessibilityService extends AccessibilityService {
         clearRequest(false);
     }
 
-    private Rect findTargetBounds(AccessibilityNodeInfo root, String target) {
+    private boolean setSearchQuery(Prefs.Slot slot, int displayId,
+                                   AccessibilityNodeInfo field, long now) {
+        if (field == null || requestSearchSetAttempts >= MAX_SEARCH_SET_ATTEMPTS) return false;
+        requestSearchSetAttempts++;
+        requestNavigationActions++;
+        requestLastNavigationAt = now;
+
+        boolean success = false;
+        String detail = "Accessibility ACTION_SET_TEXT";
+        try {
+            field.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
+            Bundle args = new Bundle();
+            args.putCharSequence(
+                AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                slot.name
+            );
+            success = field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
+        } catch (Throwable t) {
+            detail = t.getClass().getSimpleName() + ": " + safeText(t.getMessage());
+        }
+
+        health.markNavigation(displayId,
+            "SEARCH_QUERY_SET " + requestSearchSetAttempts + "/" + MAX_SEARCH_SET_ATTEMPTS,
+            success, detail, now);
+
+        if (success) {
+            requestSearchOpened = true;
+            requestSearchQuerySet = true;
+            requestSearchQueryAt = now;
+            prefs.markChecked(slot.index, now,
+                "已輸入「" + slot.name + "」· 等待 LINE 搜尋結果");
+            prefs.setGlobalStatus("正在搜尋監控聊天室「" + slot.name + "」");
+        }
+        return success;
+    }
+
+    private Rect findListTargetBounds(AccessibilityNodeInfo root, String target) {
         if (root == null) return null;
+        Rect rootBounds = new Rect();
+        root.getBoundsInScreen(rootBounds);
+        int minY = rootBounds.top + Math.max(1, (int) (rootBounds.height() * 0.12f));
+        int maxY = rootBounds.top + Math.max(1, (int) (rootBounds.height() * 0.90f));
+        return findTargetBoundsInBand(root, target, minY, maxY, true);
+    }
+
+    private Rect findSearchResultBounds(AccessibilityNodeInfo root, String target) {
+        if (root == null) return null;
+        Rect rootBounds = new Rect();
+        root.getBoundsInScreen(rootBounds);
+        int minY = rootBounds.top + Math.max(1, (int) (rootBounds.height() * 0.18f));
+        int maxY = rootBounds.top + Math.max(1, (int) (rootBounds.height() * 0.92f));
+        return findTargetBoundsInBand(root, target, minY, maxY, true);
+    }
+
+    private Rect findTargetBoundsInBand(AccessibilityNodeInfo root, String target,
+                                        int minY, int maxY, boolean excludeEditable) {
         List<AccessibilityNodeInfo> matches = root.findAccessibilityNodeInfosByText(target);
         if (matches == null) return null;
         Rect best = null;
         long bestArea = Long.MAX_VALUE;
         for (AccessibilityNodeInfo node : matches) {
             if (node == null) continue;
+            if (excludeEditable && node.isEditable()) continue;
             String text = node.getText() == null ? "" : node.getText().toString();
             String desc = node.getContentDescription() == null ? "" : node.getContentDescription().toString();
             if (!matchesTarget(text, target) && !matchesTarget(desc, target)) continue;
             Rect r = new Rect();
             node.getBoundsInScreen(r);
             if (r.width() <= 0 || r.height() <= 0) continue;
+            if (r.centerY() < minY || r.centerY() > maxY) continue;
             long area = (long) r.width() * r.height();
             if (area < bestArea) {
                 bestArea = area;
@@ -475,25 +617,164 @@ public class LineReadAccessibilityService extends AccessibilityService {
         Rect best = null;
         long bestArea = Long.MAX_VALUE;
 
-        for (String label : CHAT_TAB_LABELS) {
-            List<AccessibilityNodeInfo> matches = root.findAccessibilityNodeInfosByText(label);
-            if (matches == null) continue;
-            for (AccessibilityNodeInfo node : matches) {
-                if (node == null) continue;
-                String text = normalize(node.getText() == null ? "" : node.getText().toString());
-                String desc = normalize(node.getContentDescription() == null ? "" : node.getContentDescription().toString());
-                if (!CHAT_TAB_LABELS.contains(text) && !CHAT_TAB_LABELS.contains(desc)) continue;
+        Deque<AccessibilityNodeInfo> stack = new ArrayDeque<>();
+        stack.push(root);
+        while (!stack.isEmpty()) {
+            AccessibilityNodeInfo node = stack.pop();
+            String text = normalize(node.getText() == null ? "" : node.getText().toString());
+            String desc = normalize(node.getContentDescription() == null ? "" : node.getContentDescription().toString());
+            if (isChatTabLabel(text) || isChatTabLabel(desc)) {
                 Rect r = new Rect();
                 node.getBoundsInScreen(r);
-                if (r.width() <= 0 || r.height() <= 0 || r.centerY() < minY) continue;
-                long area = (long) r.width() * r.height();
-                if (area < bestArea) {
-                    bestArea = area;
-                    best = new Rect(r);
+                if (r.width() > 0 && r.height() > 0 && r.centerY() >= minY) {
+                    long area = (long) r.width() * r.height();
+                    if (area < bestArea) {
+                        bestArea = area;
+                        best = new Rect(r);
+                    }
                 }
+            }
+            for (int i = 0; i < node.getChildCount(); i++) {
+                AccessibilityNodeInfo child = node.getChild(i);
+                if (child != null) stack.push(child);
             }
         }
         return best;
+    }
+
+    private AccessibilityNodeInfo findSearchField(AccessibilityNodeInfo root) {
+        if (root == null) return null;
+        Rect rootBounds = new Rect();
+        root.getBoundsInScreen(rootBounds);
+        int maxY = rootBounds.top + (int) (rootBounds.height() * 0.45f);
+
+        AccessibilityNodeInfo best = null;
+        int bestTop = Integer.MAX_VALUE;
+        Deque<AccessibilityNodeInfo> stack = new ArrayDeque<>();
+        stack.push(root);
+        while (!stack.isEmpty()) {
+            AccessibilityNodeInfo node = stack.pop();
+            CharSequence cls = node.getClassName();
+            String className = cls == null ? "" : cls.toString().toLowerCase(Locale.ROOT);
+            boolean editable = node.isEditable() || className.contains("edittext");
+            if (editable) {
+                Rect r = new Rect();
+                node.getBoundsInScreen(r);
+                if (r.width() > 0 && r.height() > 0 && r.centerY() <= maxY && r.top < bestTop) {
+                    bestTop = r.top;
+                    best = node;
+                }
+            }
+            for (int i = 0; i < node.getChildCount(); i++) {
+                AccessibilityNodeInfo child = node.getChild(i);
+                if (child != null) stack.push(child);
+            }
+        }
+        return best;
+    }
+
+    private Rect findSearchButtonBounds(AccessibilityNodeInfo root) {
+        if (root == null) return null;
+        Rect rootBounds = new Rect();
+        root.getBoundsInScreen(rootBounds);
+        int maxY = rootBounds.top + (int) (rootBounds.height() * 0.45f);
+        Rect best = null;
+        long bestArea = Long.MAX_VALUE;
+
+        Deque<AccessibilityNodeInfo> stack = new ArrayDeque<>();
+        stack.push(root);
+        while (!stack.isEmpty()) {
+            AccessibilityNodeInfo node = stack.pop();
+            String text = normalize(node.getText() == null ? "" : node.getText().toString());
+            String desc = normalize(node.getContentDescription() == null ? "" : node.getContentDescription().toString());
+            String hint = "";
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && node.getHintText() != null) {
+                    hint = normalize(node.getHintText().toString());
+                }
+            } catch (Throwable ignored) {}
+
+            if (!node.isEditable() && (isSearchLabel(text) || isSearchLabel(desc) || isSearchLabel(hint))) {
+                Rect r = new Rect();
+                node.getBoundsInScreen(r);
+                if (r.width() > 0 && r.height() > 0 && r.centerY() <= maxY) {
+                    long area = (long) r.width() * r.height();
+                    if (area < bestArea) {
+                        bestArea = area;
+                        best = new Rect(r);
+                    }
+                }
+            }
+            for (int i = 0; i < node.getChildCount(); i++) {
+                AccessibilityNodeInfo child = node.getChild(i);
+                if (child != null) stack.push(child);
+            }
+        }
+        return best;
+    }
+
+    private Rect boundsOf(AccessibilityNodeInfo node) {
+        if (node == null) return null;
+        Rect r = new Rect();
+        node.getBoundsInScreen(r);
+        return r.width() > 0 && r.height() > 0 ? r : null;
+    }
+
+    private boolean isChatTabLabel(String value) {
+        String n = normalize(value);
+        if (n.isEmpty()) return false;
+        if (CHAT_TAB_LABELS.contains(n)) return true;
+        String lower = n.toLowerCase(Locale.ROOT);
+        return n.contains("聊天") || lower.contains("chats") || lower.equals("talk")
+            || n.contains("トーク") || n.contains("채팅");
+    }
+
+    private boolean isSearchLabel(String value) {
+        String n = normalize(value);
+        if (n.isEmpty()) return false;
+        String lower = n.toLowerCase(Locale.ROOT);
+        return n.contains("搜尋") || n.contains("搜索") || lower.contains("search")
+            || n.contains("検索") || n.contains("검색");
+    }
+
+    private String summarizeTopControls(AccessibilityNodeInfo root) {
+        if (root == null) return "no LINE root";
+        Rect rootBounds = new Rect();
+        root.getBoundsInScreen(rootBounds);
+        int maxY = rootBounds.top + (int) (rootBounds.height() * 0.50f);
+        List<String> values = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        Deque<AccessibilityNodeInfo> stack = new ArrayDeque<>();
+        stack.push(root);
+        while (!stack.isEmpty() && values.size() < 8) {
+            AccessibilityNodeInfo node = stack.pop();
+            Rect r = new Rect();
+            node.getBoundsInScreen(r);
+            if (r.width() > 0 && r.height() > 0 && r.centerY() <= maxY) {
+                String text = normalize(node.getText() == null ? "" : node.getText().toString());
+                String desc = normalize(node.getContentDescription() == null ? "" : node.getContentDescription().toString());
+                String v = !desc.isEmpty() ? desc : text;
+                CharSequence cls = node.getClassName();
+                String className = cls == null ? "" : cls.toString().toLowerCase(Locale.ROOT);
+                boolean control = node.isClickable() || node.isEditable()
+                    || className.contains("button") || className.contains("image") || className.contains("edittext");
+                if (control && !v.isEmpty() && seen.add(v)) {
+                    if (v.length() > 36) v = v.substring(0, 36) + "…";
+                    values.add(v);
+                }
+            }
+            for (int i = 0; i < node.getChildCount(); i++) {
+                AccessibilityNodeInfo child = node.getChild(i);
+                if (child != null) stack.push(child);
+            }
+        }
+        if (values.isEmpty()) return "top controls unavailable";
+        StringBuilder out = new StringBuilder();
+        for (String v : values) {
+            if (out.length() > 0) out.append(" | ");
+            out.append(v);
+        }
+        return out.toString();
     }
 
     private boolean clickTargetWithAccessibility(AccessibilityNodeInfo root, String target) {
@@ -738,12 +1019,22 @@ public class LineReadAccessibilityService extends AccessibilityService {
         requestChatsTabOpened = false;
         requestChatsTabTapAttempts = 0;
         requestBackSteps = 0;
+        resetSearchState();
         requestScrollToTopSteps = 0;
         requestScrollForwardSteps = 0;
         requestNavigationActions = 0;
         requestLastNavigationAt = 0L;
         requestTargetClickAt = 0L;
         navigationActionInProgress = false;
+    }
+
+    private void resetSearchState() {
+        requestSearchOpened = false;
+        requestSearchQuerySet = false;
+        requestSearchFallback = false;
+        requestSearchOpenAttempts = 0;
+        requestSearchSetAttempts = 0;
+        requestSearchQueryAt = 0L;
     }
 
     private ScanResult scanAvailableLineWindows(String target) {
@@ -952,6 +1243,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
     private boolean isUiControlToken(String value) {
         String normalized = normalize(value);
         if (UI_LABELS.contains(normalized)) return true;
+        if (isSearchLabel(normalized)) return true;
         String lower = normalized.toLowerCase(Locale.ROOT);
         return lower.contains("顯示加號選單")
             || lower.contains("加號選單")
@@ -1012,6 +1304,10 @@ public class LineReadAccessibilityService extends AccessibilityService {
         if (value == null) return "";
         return value.replace("\u200B", "").replace("\u200E", "").replace("\u200F", "")
             .replace('\u00A0', ' ').trim();
+    }
+
+    private String safeText(String value) {
+        return value == null || value.trim().isEmpty() ? "unknown" : value.trim();
     }
 
     private void ensureNotificationChannel() {
