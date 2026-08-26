@@ -1,6 +1,13 @@
 package com.example.linereadradar;
 
 import android.content.Context;
+import android.graphics.PixelFormat;
+import android.hardware.display.DisplayManager;
+import android.hardware.display.VirtualDisplay;
+import android.media.Image;
+import android.media.ImageReader;
+import android.os.Handler;
+import android.os.HandlerThread;
 
 import androidx.annotation.Keep;
 
@@ -9,15 +16,134 @@ import java.io.InputStreamReader;
 
 public class RadarShellUserService extends IRadarShellService.Stub {
     private static final String LINE_PACKAGE = "jp.naver.line.android";
+    private static final String SHELL_PACKAGE = "com.android.shell";
+
+    // Hidden DisplayManager flags. Values are stable platform constants on the
+    // Android versions supported by this experiment.
+    private static final int FLAG_SUPPORTS_TOUCH = 1 << 6;
+    private static final int FLAG_TRUSTED = 1 << 10;
+    private static final int FLAG_OWN_DISPLAY_GROUP = 1 << 11;
+    private static final int FLAG_ALWAYS_UNLOCKED = 1 << 12;
+    private static final int FLAG_OWN_FOCUS = 1 << 14;
+
+    private final Object displayLock = new Object();
+    private Context context;
+    private ImageReader imageReader;
+    private VirtualDisplay virtualDisplay;
+    private HandlerThread drainThread;
+    private Handler drainHandler;
+    private volatile String displayStatus = "Shizuku 第二畫面尚未建立";
 
     public RadarShellUserService() {}
 
     @Keep
-    public RadarShellUserService(Context context) {}
+    public RadarShellUserService(Context context) {
+        this.context = context;
+    }
 
     @Override
     public void destroy() {
+        releaseDisplayInternal();
         System.exit(0);
+    }
+
+    @Override
+    public int ensureVirtualDisplay(int width, int height, int densityDpi) {
+        synchronized (displayLock) {
+            int existing = currentDisplayIdLocked();
+            if (existing > 0) {
+                displayStatus = "Display " + existing + " · Shizuku 常駐 · Always unlocked";
+                return existing;
+            }
+
+            if (context == null) {
+                displayStatus = "ERR: UserService Context unavailable";
+                return -1;
+            }
+
+            int safeWidth = Math.max(320, width);
+            int safeHeight = Math.max(480, height);
+            int safeDensity = Math.max(160, densityDpi);
+
+            try {
+                // DisplayManager validates packageName against the Binder calling UID.
+                // The UserService runs as uid=2000, therefore use com.android.shell's
+                // Context instead of the Radar app package context.
+                Context shellContext = context.createPackageContext(
+                    SHELL_PACKAGE, Context.CONTEXT_IGNORE_SECURITY);
+                DisplayManager dm = (DisplayManager) shellContext.getSystemService(Context.DISPLAY_SERVICE);
+                if (dm == null) {
+                    displayStatus = "ERR: shell DisplayManager unavailable";
+                    return -1;
+                }
+
+                drainThread = new HandlerThread("RadarShellDisplayDrain");
+                drainThread.start();
+                drainHandler = new Handler(drainThread.getLooper());
+                imageReader = ImageReader.newInstance(
+                    safeWidth, safeHeight, PixelFormat.RGBA_8888, 3);
+                imageReader.setOnImageAvailableListener(reader -> {
+                    Image image = null;
+                    try { image = reader.acquireLatestImage(); }
+                    catch (Throwable ignored) {}
+                    finally { if (image != null) image.close(); }
+                }, drainHandler);
+
+                int flags = DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC
+                    | DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
+                    | DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION
+                    | FLAG_SUPPORTS_TOUCH
+                    | FLAG_TRUSTED
+                    | FLAG_OWN_DISPLAY_GROUP
+                    | FLAG_ALWAYS_UNLOCKED
+                    | FLAG_OWN_FOCUS;
+
+                virtualDisplay = dm.createVirtualDisplay(
+                    "LINE-Radar-Shizuku-AlwaysOn",
+                    safeWidth,
+                    safeHeight,
+                    safeDensity,
+                    imageReader.getSurface(),
+                    flags
+                );
+
+                int id = currentDisplayIdLocked();
+                if (id <= 0) {
+                    displayStatus = "ERR: Android returned no Shizuku Virtual Display";
+                    releaseDisplayResourcesLocked();
+                    return -1;
+                }
+
+                displayStatus = "Display " + id
+                    + " · Shizuku shell 建立 · Trusted · Always unlocked · Own focus";
+                return id;
+            } catch (SecurityException se) {
+                displayStatus = "ERR SecurityException: " + safe(se.getMessage());
+                releaseDisplayResourcesLocked();
+                return -1;
+            } catch (Throwable t) {
+                displayStatus = "ERR " + t.getClass().getSimpleName() + ": " + safe(t.getMessage());
+                releaseDisplayResourcesLocked();
+                return -1;
+            }
+        }
+    }
+
+    @Override
+    public int getVirtualDisplayId() {
+        synchronized (displayLock) {
+            return currentDisplayIdLocked();
+        }
+    }
+
+    @Override
+    public String getVirtualDisplayStatus() {
+        return displayStatus;
+    }
+
+    @Override
+    public void releaseVirtualDisplay() {
+        releaseDisplayInternal();
     }
 
     @Override
@@ -27,6 +153,14 @@ public class RadarShellUserService extends IRadarShellService.Stub {
             return "ERR:2\ninvalid component";
         }
         if (displayId <= 0) return "ERR:2\ninvalid display";
+
+        synchronized (displayLock) {
+            int currentId = currentDisplayIdLocked();
+            if (currentId <= 0 || currentId != displayId) {
+                return "ERR:2\nShizuku display is not alive: expected " + displayId
+                    + ", current " + currentId;
+            }
+        }
 
         Process process = null;
         try {
@@ -57,6 +191,38 @@ public class RadarShellUserService extends IRadarShellService.Stub {
             if (process != null) {
                 try { process.destroy(); } catch (Throwable ignored) {}
             }
+        }
+    }
+
+    private void releaseDisplayInternal() {
+        synchronized (displayLock) {
+            releaseDisplayResourcesLocked();
+            displayStatus = "Shizuku 第二畫面已釋放";
+        }
+    }
+
+    private int currentDisplayIdLocked() {
+        try {
+            return virtualDisplay == null || virtualDisplay.getDisplay() == null
+                ? -1 : virtualDisplay.getDisplay().getDisplayId();
+        } catch (Throwable ignored) {
+            return -1;
+        }
+    }
+
+    private void releaseDisplayResourcesLocked() {
+        if (virtualDisplay != null) {
+            try { virtualDisplay.release(); } catch (Throwable ignored) {}
+            virtualDisplay = null;
+        }
+        if (imageReader != null) {
+            try { imageReader.close(); } catch (Throwable ignored) {}
+            imageReader = null;
+        }
+        if (drainThread != null) {
+            try { drainThread.quitSafely(); } catch (Throwable ignored) {}
+            drainThread = null;
+            drainHandler = null;
         }
     }
 
