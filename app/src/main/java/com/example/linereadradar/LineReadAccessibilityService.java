@@ -37,8 +37,9 @@ public class LineReadAccessibilityService extends AccessibilityService {
     static final String ACTION_BASELINE = "com.example.linereadradar.BASELINE";
 
     private static final String LINE_PACKAGE = "jp.naver.line.android";
-    private static final String CHANNEL_ID = "line_read_radar_events_v052";
+    private static final String CHANNEL_ID = "line_read_radar_events_v053";
     private static final long DEBOUNCE_MS = 250L;
+    private static final long WATCHDOG_MS = 700L;
     private static final long REQUEST_TIMEOUT_MS = 15000L;
     private static final long MANUAL_SESSION_GAP_MS = 1600L;
     private static final long MANUAL_STABLE_MS = 1000L;
@@ -68,6 +69,22 @@ public class LineReadAccessibilityService extends AccessibilityService {
     private long manualLastSeenAt = 0L;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
+
+    private final Runnable watchdogRunnable = new Runnable() {
+        @Override
+        public void run() {
+            try {
+                if (prefs != null && prefs.globalEnabled() && !prefs.paused() && prefs.activeCount() > 0) {
+                    long now = System.currentTimeMillis();
+                    if (requestedSlot >= 0) evaluateRequestedSlot(now);
+                    else evaluateVisibleMonitoredChat(now);
+                }
+            } catch (Throwable ignored) {
+                // Accessibility trees can disappear while LINE changes windows. Retry next tick.
+            }
+            handler.postDelayed(this, WATCHDOG_MS);
+        }
+    };
 
     private final Runnable timeoutRunnable = () -> {
         if (requestedSlot < 0) return;
@@ -115,6 +132,13 @@ public class LineReadAccessibilityService extends AccessibilityService {
     }
 
     @Override
+    protected void onServiceConnected() {
+        super.onServiceConnected();
+        handler.removeCallbacks(watchdogRunnable);
+        handler.post(watchdogRunnable);
+    }
+
+    @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
         if (event == null || event.getPackageName() == null) return;
         if (!LINE_PACKAGE.contentEquals(event.getPackageName())) return;
@@ -138,6 +162,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
     @Override
     public void onDestroy() {
         handler.removeCallbacks(timeoutRunnable);
+        handler.removeCallbacks(watchdogRunnable);
         try { unregisterReceiver(requestReceiver); } catch (Exception ignored) {}
         super.onDestroy();
     }
