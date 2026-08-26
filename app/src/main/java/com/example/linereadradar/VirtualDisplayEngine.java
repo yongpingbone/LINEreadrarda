@@ -1,80 +1,93 @@
 package com.example.linereadradar;
 
 import android.content.Context;
-import android.graphics.PixelFormat;
-import android.hardware.display.DisplayManager;
-import android.hardware.display.VirtualDisplay;
-import android.media.Image;
-import android.media.ImageReader;
 import android.os.Handler;
-import android.os.HandlerThread;
 
 final class VirtualDisplayEngine {
     interface ResultCallback {
         void onResult(Result result);
     }
 
-    // Hidden Android platform flag. It only marks this virtual display as touch-capable;
-    // it does not grant trusted/system display privileges.
-    private static final int VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH = 1 << 6;
-
-    private static ImageReader imageReader;
-    private static VirtualDisplay virtualDisplay;
-    private static HandlerThread drainThread;
-    private static Handler drainHandler;
     private static Context appContext;
+    private static volatile int remoteDisplayId = -1;
     private static volatile String status = "尚未建立第二畫面";
 
-    static synchronized Result create(Context context) {
-        releaseInternal(false);
-        try {
-            appContext = context.getApplicationContext();
-            int width = 720;
-            int height = 1280;
-            int density = Math.max(240, context.getResources().getDisplayMetrics().densityDpi);
-
-            drainThread = new HandlerThread("RadarDisplayDrain");
-            drainThread.start();
-            drainHandler = new Handler(drainThread.getLooper());
-            imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3);
-            imageReader.setOnImageAvailableListener(reader -> {
-                Image image = null;
-                try { image = reader.acquireLatestImage(); }
-                catch (Throwable ignored) {}
-                finally { if (image != null) image.close(); }
-            }, drainHandler);
-
-            DisplayManager dm = (DisplayManager) context.getSystemService(Context.DISPLAY_SERVICE);
-            if (dm == null) return failAndRelease("DisplayManager unavailable");
-
-            int flags = DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC
-                | DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
-                | DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION
-                | VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH;
-
-            virtualDisplay = dm.createVirtualDisplay(
-                "LINE-Radar-Shizuku",
-                width,
-                height,
-                density,
-                imageReader.getSurface(),
-                flags
-            );
-
-            if (virtualDisplay == null || virtualDisplay.getDisplay() == null) {
-                return failAndRelease("Android 建立 Virtual Display 失敗");
+    static synchronized void attach(Context context) {
+        if (context == null) return;
+        appContext = context.getApplicationContext();
+        if (remoteDisplayId < 0) {
+            Prefs prefs = new Prefs(appContext);
+            if (prefs.virtualDisplayRunning() && prefs.virtualDisplayId() > 0) {
+                remoteDisplayId = prefs.virtualDisplayId();
+                status = prefs.virtualDisplayStatus();
             }
-
-            int id = virtualDisplay.getDisplay().getDisplayId();
-            status = "第二畫面已建立 · Display " + id + " · 互動模式 ON · 等待 LINE";
-            new Prefs(context).setVirtualDisplayRunning(id, status);
-            return Result.ok(id, status);
-        } catch (Throwable t) {
-            return failAndRelease(t.getClass().getSimpleName() + ": " + safe(t.getMessage()));
         }
     }
 
+    static void create(Context context, ResultCallback callback) {
+        attach(context);
+        if (!ShizukuBridge.binderReady()) {
+            post(callback, Result.fail("Shizuku 尚未啟動"));
+            return;
+        }
+        if (!ShizukuBridge.permissionGranted()) {
+            post(callback, Result.fail("LINE Radar 尚未取得 Shizuku 授權"));
+            return;
+        }
+
+        int density = Math.max(240, context.getResources().getDisplayMetrics().densityDpi);
+        ShizukuBridge.ensureVirtualDisplay(context, 720, 1280, density, shell -> {
+            Context app = context.getApplicationContext();
+            if (!shell.success || shell.displayId <= 0) {
+                synchronized (VirtualDisplayEngine.class) { remoteDisplayId = -1; }
+                status = shell.message.isEmpty() ? "Shizuku 建立第二畫面失敗" : shell.message;
+                new Prefs(app).setVirtualDisplayStopped(status);
+                if (callback != null) callback.onResult(Result.fail(status));
+                return;
+            }
+
+            synchronized (VirtualDisplayEngine.class) { remoteDisplayId = shell.displayId; }
+            status = "Display " + shell.displayId
+                + " · Shizuku Trusted / Always unlocked · 等待 LINE";
+            new Prefs(app).setVirtualDisplayRunning(shell.displayId, status);
+            if (callback != null) callback.onResult(Result.ok(shell.displayId, status));
+        });
+    }
+
+    static void restore(Context context, ResultCallback callback) {
+        attach(context);
+        if (!ShizukuBridge.binderReady() || !ShizukuBridge.permissionGranted()) {
+            synchronized (VirtualDisplayEngine.class) { remoteDisplayId = -1; }
+            post(callback, Result.fail("Shizuku 尚未準備完成"));
+            return;
+        }
+
+        final Context app = context.getApplicationContext();
+        ShizukuBridge.queryVirtualDisplay(shell -> {
+            if (!shell.success || shell.displayId <= 0) {
+                synchronized (VirtualDisplayEngine.class) { remoteDisplayId = -1; }
+                status = shell.message.isEmpty() ? "Shizuku 第二畫面不存在" : shell.message;
+                new Prefs(app).setVirtualDisplayStopped(status);
+                if (callback != null) callback.onResult(Result.fail(status));
+                return;
+            }
+
+            synchronized (VirtualDisplayEngine.class) { remoteDisplayId = shell.displayId; }
+            status = shell.message.isEmpty()
+                ? "Display " + shell.displayId + " · Shizuku 第二畫面仍存在"
+                : shell.message;
+            Prefs prefs = new Prefs(app);
+            if (!prefs.virtualDisplayRunning() || prefs.virtualDisplayId() != shell.displayId) {
+                prefs.setVirtualDisplayRunning(shell.displayId, status);
+            } else {
+                prefs.updateVirtualDisplayStatus(status);
+            }
+            if (callback != null) callback.onResult(Result.ok(shell.displayId, status));
+        });
+    }
+
     static void launchLine(Context context, ResultCallback callback) {
+        attach(context);
         final int id = displayId();
         if (id < 0) {
             post(callback, Result.fail("請先建立第二畫面"));
@@ -110,8 +123,14 @@ final class VirtualDisplayEngine {
     }
 
     static synchronized int displayId() {
-        return virtualDisplay == null || virtualDisplay.getDisplay() == null
-            ? -1 : virtualDisplay.getDisplay().getDisplayId();
+        if (remoteDisplayId > 0) return remoteDisplayId;
+        if (appContext != null) {
+            Prefs prefs = new Prefs(appContext);
+            if (prefs.virtualDisplayRunning() && prefs.virtualDisplayId() > 0) {
+                return prefs.virtualDisplayId();
+            }
+        }
+        return -1;
     }
 
     static synchronized boolean alive() {
@@ -124,46 +143,25 @@ final class VirtualDisplayEngine {
         status = value == null ? "未知狀態" : value;
         Context ctx = appContext;
         if (ctx != null) {
-            if (displayId() >= 0) new Prefs(ctx).updateVirtualDisplayStatus(status);
+            int id = displayId();
+            if (id >= 0) new Prefs(ctx).updateVirtualDisplayStatus(status);
             else new Prefs(ctx).setVirtualDisplayStopped(status);
         }
     }
 
     static synchronized void release() {
-        releaseInternal(true);
-    }
+        final Context ctx = appContext;
+        remoteDisplayId = -1;
+        status = "第二畫面已手動關閉";
+        if (ctx != null) new Prefs(ctx).setVirtualDisplayStopped(status);
 
-    private static synchronized void releaseInternal(boolean userInitiated) {
-        releaseDisplayResources();
-        status = userInitiated ? "第二畫面已手動關閉" : "第二畫面準備重建";
-        if (appContext != null) new Prefs(appContext).setVirtualDisplayStopped(status);
-    }
-
-    private static void releaseDisplayResources() {
-        if (virtualDisplay != null) {
-            try { virtualDisplay.release(); } catch (Throwable ignored) {}
-            virtualDisplay = null;
+        if (ShizukuBridge.permissionGranted()) {
+            ShizukuBridge.releaseVirtualDisplay(result -> {
+                if (!result.success && ctx != null) {
+                    new Prefs(ctx).setGlobalStatus("第二畫面釋放失敗 · " + result.message);
+                }
+            });
         }
-        if (imageReader != null) {
-            try { imageReader.close(); } catch (Throwable ignored) {}
-            imageReader = null;
-        }
-        if (drainThread != null) {
-            try { drainThread.quitSafely(); } catch (Throwable ignored) {}
-            drainThread = null;
-            drainHandler = null;
-        }
-    }
-
-    private static Result failAndRelease(String message) {
-        status = message;
-        releaseDisplayResources();
-        if (appContext != null) new Prefs(appContext).setVirtualDisplayStopped(message);
-        return Result.fail(message);
-    }
-
-    private static String safe(String value) {
-        return value == null || value.trim().isEmpty() ? "unknown error" : value.trim();
     }
 
     static final class Result {
