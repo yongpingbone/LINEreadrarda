@@ -1,5 +1,7 @@
 package com.example.linereadradar;
 
+import android.app.ActivityManager;
+import android.content.ComponentName;
 import android.content.Context;
 import android.graphics.PixelFormat;
 import android.hardware.display.DisplayManager;
@@ -13,6 +15,7 @@ import androidx.annotation.Keep;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
+import java.util.List;
 
 public class RadarShellUserService extends IRadarShellService.Stub {
     private static final String LINE_PACKAGE = "jp.naver.line.android";
@@ -66,11 +69,7 @@ public class RadarShellUserService extends IRadarShellService.Stub {
             int safeDensity = Math.max(160, densityDpi);
 
             try {
-                // DisplayManager validates packageName against the Binder calling UID.
-                // The UserService runs as uid=2000, therefore use com.android.shell's
-                // Context instead of the Radar app package context.
-                Context shellContext = context.createPackageContext(
-                    SHELL_PACKAGE, Context.CONTEXT_IGNORE_SECURITY);
+                Context shellContext = shellContext();
                 DisplayManager dm = (DisplayManager) shellContext.getSystemService(Context.DISPLAY_SERVICE);
                 if (dm == null) {
                     displayStatus = "ERR: shell DisplayManager unavailable";
@@ -192,6 +191,51 @@ public class RadarShellUserService extends IRadarShellService.Stub {
                 try { process.destroy(); } catch (Throwable ignored) {}
             }
         }
+    }
+
+    @Override
+    public String pulseAppTaskOnDisplay(String packageName, int displayId) {
+        if (!LINE_PACKAGE.equals(packageName)) return "ERR:2\npackage not allowed";
+        if (displayId <= 0) return "ERR:2\ninvalid display";
+
+        synchronized (displayLock) {
+            int currentId = currentDisplayIdLocked();
+            if (currentId <= 0 || currentId != displayId) {
+                return "ERR:2\nShizuku display is not alive: expected " + displayId
+                    + ", current " + currentId;
+            }
+        }
+
+        try {
+            Context shellContext = shellContext();
+            ActivityManager am = (ActivityManager) shellContext.getSystemService(Context.ACTIVITY_SERVICE);
+            if (am == null) return "ERR:3\nActivityManager unavailable";
+
+            List<ActivityManager.RunningTaskInfo> tasks = am.getRunningTasks(100);
+            if (tasks == null) return "ERR:3\nno running task list";
+
+            for (ActivityManager.RunningTaskInfo task : tasks) {
+                if (task == null || task.id <= 0 || task.displayId != displayId) continue;
+                ComponentName top = task.topActivity;
+                ComponentName base = task.baseActivity;
+                boolean matches = (top != null && LINE_PACKAGE.equals(top.getPackageName()))
+                    || (base != null && LINE_PACKAGE.equals(base.getPackageName()));
+                if (!matches) continue;
+
+                am.moveTaskToFront(task.id, ActivityManager.MOVE_TASK_NO_USER_ACTION);
+                return "OK\ntask " + task.id + " moved to front on Display " + displayId;
+            }
+            return "ERR:4\nLINE task not found on Display " + displayId;
+        } catch (SecurityException se) {
+            return "ERR:5\nSecurityException: " + safe(se.getMessage());
+        } catch (Throwable t) {
+            return "ERR:1\n" + t.getClass().getSimpleName() + ": " + safe(t.getMessage());
+        }
+    }
+
+    private Context shellContext() throws Exception {
+        if (context == null) throw new IllegalStateException("UserService Context unavailable");
+        return context.createPackageContext(SHELL_PACKAGE, Context.CONTEXT_IGNORE_SECURITY);
     }
 
     private void releaseDisplayInternal() {
