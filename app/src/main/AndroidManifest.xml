@@ -33,9 +33,17 @@
             android:exported="false"
             android:label="Radar Lab" />
 
+        <!--
+             Shizuku Wireless Debugging runs as Android shell (UID 2000). The shell process must be
+             allowed to start this Activity on the secondary display, so exported=false cannot work
+             in the final no-root architecture. Restrict the exported entry point with DUMP, a
+             platform permission held by com.android.shell, instead of exposing a generally
+             launchable Activity to ordinary third-party apps.
+        -->
         <activity
             android:name=".NoReadShieldActivity"
-            android:exported="false"
+            android:exported="true"
+            android:permission="android.permission.DUMP"
             android:excludeFromRecents="true"
             android:launchMode="singleTask"
             android:taskAffinity="com.example.linereadradar.noreadshield"
