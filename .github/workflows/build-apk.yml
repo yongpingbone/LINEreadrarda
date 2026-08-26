@@ -36,14 +36,14 @@ jobs:
         run: gradle --no-daemon clean assembleDebug
 
       - name: Rename APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk LINE-Radar-v0.5.7-Exp.apk
+        run: cp app/build/outputs/apk/debug/app-debug.apk LINE-Radar-v0.5.8-Exp.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: LINE-Radar-v0.5.7-Exp
-          path: LINE-Radar-v0.5.7-Exp.apk
+          name: LINE-Radar-v0.5.8-Exp
+          path: LINE-Radar-v0.5.8-Exp.apk
           if-no-files-found: error
           retention-days: 14
 
-# v0.5.7-exp: second display stays monitored even while the user actively uses other apps on the main screen
+# v0.5.8-exp: single persistent Radar status, clearer second-display success, explicit lock-screen interruption alert
