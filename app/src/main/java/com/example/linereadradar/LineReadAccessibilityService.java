@@ -55,7 +55,10 @@ public class LineReadAccessibilityService extends AccessibilityService {
     private static final Set<String> UI_LABELS = setOf(
         "聊天", "主頁", "首页", "VOOM", "錢包", "钱包",
         "Chats", "Home", "Wallet", "Talk", "ホーム", "トーク", "ウォレット",
-        "채팅", "홈", "지갑"
+        "채팅", "홈", "지갑",
+        "顯示加號選單", "加號選單", "從照片、影片按鈕", "從照片、影片",
+        "Open plus menu", "Photos and videos button", "Photos and videos",
+        "プラスメニューを表示", "写真・動画ボタン", "사진 및 동영상 버튼"
     );
 
     private Prefs prefs;
@@ -179,7 +182,8 @@ public class LineReadAccessibilityService extends AccessibilityService {
             return;
         }
 
-        ScanResult scan = scanAvailableLineWindows(slot.name);
+        boolean secondaryMode = !baselineRequest && isSecondaryBackgroundMode(slot);
+        ScanResult scan = scanAvailableLineWindows(slot.name, secondaryMode);
         if (scan.targetVisible) {
             if (!slot.armed || baselineRequest) establishBaseline(slot, scan, now);
             else processSlot(slot, scan, now, true);
@@ -242,11 +246,20 @@ public class LineReadAccessibilityService extends AccessibilityService {
         if (requestedSlot >= 0) clearRequest(false);
     }
 
+    private boolean isSecondaryBackgroundMode(Prefs.Slot slot) {
+        if (slot == null || !slot.backgroundActive()) return false;
+        if (!prefs.virtualDisplayRunning()) return false;
+        int id = prefs.virtualDisplayId();
+        return id >= 0 && prefs.secondaryLineDisplayId() == id;
+    }
+
     private void evaluateVisibleMonitoredChat(long now) {
         for (int i = 0; i < Prefs.MAX_SLOTS; i++) {
             Prefs.Slot slot = prefs.slot(i);
             if (!slot.active()) continue;
-            ScanResult scan = scanAvailableLineWindows(slot.name);
+
+            boolean secondaryMode = isSecondaryBackgroundMode(slot);
+            ScanResult scan = scanAvailableLineWindows(slot.name, secondaryMode);
             if (!scan.targetVisible) continue;
 
             if (!slot.armed) {
@@ -254,6 +267,17 @@ public class LineReadAccessibilityService extends AccessibilityService {
                 manualVisibleSlot = slot.index;
                 manualVisibleSince = now;
                 manualLastSeenAt = now;
+                return;
+            }
+
+            // A verified background slot on the Virtual Display is a continuous
+            // monitor, not a user manually re-entering the chat. Never reset its
+            // baseline merely because the Accessibility window disappeared briefly.
+            if (secondaryMode) {
+                manualVisibleSlot = -1;
+                manualVisibleSince = 0L;
+                manualLastSeenAt = 0L;
+                processSlot(prefs.slot(slot.index), scan, now, false);
                 return;
             }
 
@@ -329,9 +353,9 @@ public class LineReadAccessibilityService extends AccessibilityService {
             prefs.updateIncomingSignature(slot.index, scan.incomingSignature, now);
         }
 
-        if (!eventFired && slot.readEnabled) {
-            prefs.updateReadBaseline(slot.index, scan.readCount, scan.maxReadBottom, now);
-        }
+        // Do not continuously rewrite the read baseline on an ordinary no-event
+        // scan. LINE recycles Accessibility rows; saving a transient layout as the
+        // new baseline can swallow the real read transition on the next scan.
         prefs.markChecked(slot.index, now, eventFired ? "剛偵測到更新" : "監控中");
         prefs.setGlobalStatus("剛檢查「" + slot.name + "」");
 
@@ -375,7 +399,11 @@ public class LineReadAccessibilityService extends AccessibilityService {
     }
 
     private ScanResult scanAvailableLineWindows(String target) {
-        boolean sawLineWindow = false;
+        return scanAvailableLineWindows(target, false);
+    }
+
+    private ScanResult scanAvailableLineWindows(String target, boolean preferSecondary) {
+        boolean sawAcceptedLineWindow = false;
         boolean targetVisible = false;
         int readCount = 0;
         int maxReadBottom = -1;
@@ -393,17 +421,26 @@ public class LineReadAccessibilityService extends AccessibilityService {
                     List<AccessibilityWindowInfo> windows = all.valueAt(displayIndex);
                     if (displayId == preferredDisplayId) preferredDisplayReported = true;
                     if (windows == null) continue;
+
                     for (AccessibilityWindowInfo window : windows) {
                         if (window == null) continue;
                         AccessibilityNodeInfo root = window.getRoot();
                         if (!isLineRoot(root)) continue;
-                        sawLineWindow = true;
-                        if (displayId == preferredDisplayId && preferredDisplayId >= 0) {
+
+                        boolean onPreferred = preferredDisplayId >= 0 && displayId == preferredDisplayId;
+                        if (onPreferred) {
                             lineOnPreferredDisplay = true;
                             prefs.markSecondaryLineSeen(displayId, System.currentTimeMillis());
                             prefs.updateVirtualDisplayStatus(
                                 "Display " + displayId + " · Accessibility 已看到 LINE · 驗證完成");
                         }
+
+                        // Background monitoring must only consume the LINE instance on
+                        // the second Display. A LINE window opened by the user on the
+                        // main screen must not contaminate counts or message tokens.
+                        if (preferSecondary && preferredDisplayId >= 0 && !onPreferred) continue;
+
+                        sawAcceptedLineWindow = true;
                         ScanResult result = scanTree(root, target);
                         if (!result.targetVisible) continue;
                         targetVisible = true;
@@ -420,7 +457,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
                     if (window == null) continue;
                     AccessibilityNodeInfo root = window.getRoot();
                     if (!isLineRoot(root)) continue;
-                    sawLineWindow = true;
+                    sawAcceptedLineWindow = true;
                     ScanResult result = scanTree(root, target);
                     if (!result.targetVisible) continue;
                     targetVisible = true;
@@ -445,7 +482,9 @@ public class LineReadAccessibilityService extends AccessibilityService {
             }
         }
 
-        if (!sawLineWindow) {
+        // Never fall back to the main-screen LINE window while a background slot is
+        // explicitly tied to the verified secondary Display.
+        if (!sawAcceptedLineWindow && !preferSecondary) {
             AccessibilityNodeInfo root = getRootInActiveWindow();
             if (isLineRoot(root)) {
                 ScanResult result = scanTree(root, target);
@@ -474,6 +513,8 @@ public class LineReadAccessibilityService extends AccessibilityService {
         root.getBoundsInScreen(rootBounds);
         int headerLimit = rootBounds.top + Math.max(1, (int) (rootBounds.height() * 0.25f));
         int leftMessageLimit = rootBounds.left + (int) (rootBounds.width() * 0.62f);
+        int composerGuard = Math.max(72, (int) (rootBounds.height() * 0.10f));
+        int messageBottomLimit = rootBounds.bottom - composerGuard;
         List<MessageToken> candidates = new ArrayList<>();
         Deque<AccessibilityNodeInfo> stack = new ArrayDeque<>();
         stack.push(root);
@@ -494,8 +535,13 @@ public class LineReadAccessibilityService extends AccessibilityService {
                 maxReadBottom = Math.max(maxReadBottom, r.bottom);
             }
 
-            if (r.top > headerLimit && r.centerX() < leftMessageLimit) {
-                String token = usefulIncomingToken(text) ? text : (usefulIncomingToken(desc) ? desc : "");
+            if (r.top > headerLimit && r.bottom < messageBottomLimit && r.centerX() < leftMessageLimit) {
+                String token = "";
+                if (usefulIncomingToken(text)) {
+                    token = text;
+                } else if (!isLikelyInteractiveControl(node) && usefulIncomingToken(desc)) {
+                    token = desc;
+                }
                 if (!token.isEmpty()) candidates.add(new MessageToken(r.top, token));
             }
 
@@ -507,6 +553,15 @@ public class LineReadAccessibilityService extends AccessibilityService {
 
         Collections.sort(candidates, Comparator.comparingInt(t -> t.top));
         return buildScanResult(targetVisible, readCount, maxReadBottom, candidates);
+    }
+
+    private boolean isLikelyInteractiveControl(AccessibilityNodeInfo node) {
+        if (node == null) return false;
+        if (node.isEditable()) return true;
+        CharSequence cls = node.getClassName();
+        String name = cls == null ? "" : cls.toString().toLowerCase(Locale.ROOT);
+        if (name.contains("button") || name.contains("edittext")) return true;
+        return node.isClickable() && node.getText() == null;
     }
 
     private ScanResult buildScanResult(boolean targetVisible, int readCount, int maxReadBottom, List<MessageToken> tokens) {
@@ -543,8 +598,22 @@ public class LineReadAccessibilityService extends AccessibilityService {
         if (value == null || value.isEmpty()) return false;
         if (isReadLabel(value)) return false;
         if (TIME_LIKE.matcher(value).matches()) return false;
-        if (UI_LABELS.contains(value)) return false;
+        if (isUiControlToken(value)) return false;
         return value.length() <= 500;
+    }
+
+    private boolean isUiControlToken(String value) {
+        String normalized = normalize(value);
+        if (UI_LABELS.contains(normalized)) return true;
+        String lower = normalized.toLowerCase(Locale.ROOT);
+        return lower.contains("顯示加號選單")
+            || lower.contains("加號選單")
+            || lower.contains("從照片、影片按鈕")
+            || lower.contains("open plus menu")
+            || lower.contains("photos and videos button")
+            || lower.contains("プラスメニューを表示")
+            || lower.contains("写真・動画ボタン")
+            || lower.contains("사진 및 동영상 버튼");
     }
 
     private boolean isReadLabel(String value) {
