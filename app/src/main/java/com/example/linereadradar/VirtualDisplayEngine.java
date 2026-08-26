@@ -21,12 +21,16 @@ final class VirtualDisplayEngine {
     private static MediaProjection mediaProjection;
     private static HandlerThread drainThread;
     private static Handler drainHandler;
+    private static Context appContext;
+    private static boolean intentionalRelease = false;
     private static volatile String status = "尚未建立第二畫面";
 
     static synchronized Result createWithProjection(Context context, MediaProjection projection) {
-        release();
+        releaseInternal(false);
         if (projection == null) return failAndStore("沒有 MediaProjection 授權");
         try {
+            appContext = context.getApplicationContext();
+            intentionalRelease = false;
             int width = 720;
             int height = 1280;
             int density = Math.max(240, context.getResources().getDisplayMetrics().densityDpi);
@@ -35,10 +39,23 @@ final class VirtualDisplayEngine {
             mediaProjection.registerCallback(new MediaProjection.Callback() {
                 @Override
                 public void onStop() {
+                    Context ctx;
+                    boolean expected;
                     synchronized (VirtualDisplayEngine.class) {
+                        expected = intentionalRelease;
+                        ctx = appContext;
                         releaseDisplayResources();
                         mediaProjection = null;
-                        status = "Android 已停止螢幕分享授權";
+                        if (expected) {
+                            status = "第二畫面已關閉";
+                        } else {
+                            status = "第二畫面已被 Android 停止（鎖屏會終止目前的 MediaProjection）";
+                        }
+                    }
+                    if (ctx != null) {
+                        Prefs prefs = new Prefs(ctx);
+                        prefs.setVirtualDisplayStopped(status);
+                        if (!expected) ProjectionForegroundService.notifyProjectionEnded(ctx, status);
                     }
                 }
             }, new Handler(Looper.getMainLooper()));
@@ -72,6 +89,7 @@ final class VirtualDisplayEngine {
             }
             int id = virtualDisplay.getDisplay().getDisplayId();
             status = "第二畫面已建立 · Display " + id;
+            new Prefs(context).setVirtualDisplayRunning(id, status);
             return Result.ok(id, status);
         } catch (Throwable t) {
             return failAndRelease(t.getClass().getSimpleName() + ": " + safe(t.getMessage()));
@@ -93,7 +111,8 @@ final class VirtualDisplayEngine {
             ActivityOptions options = ActivityOptions.makeBasic();
             options.setLaunchDisplayId(displayId);
             activity.startActivity(launch, options.toBundle());
-            status = "已要求 LINE 啟動到 Display " + displayId;
+            status = "第二畫面已建立，LINE 啟動要求已送出 · Display " + displayId;
+            new Prefs(activity).setVirtualDisplayRunning(displayId, status);
             return Result.ok(displayId, status);
         } catch (SecurityException e) {
             status = "第二畫面已建立，但 Android 不允許 LINE 在這個 Display 啟動：" + safe(e.getMessage());
@@ -113,16 +132,24 @@ final class VirtualDisplayEngine {
 
     static void setExternalStatus(String value) {
         status = value == null ? "未知狀態" : value;
+        Context ctx = appContext;
+        if (ctx != null && displayId() < 0) new Prefs(ctx).setVirtualDisplayStopped(status);
     }
 
     static synchronized void release() {
+        releaseInternal(true);
+    }
+
+    private static synchronized void releaseInternal(boolean userInitiated) {
+        intentionalRelease = userInitiated;
         MediaProjection projection = mediaProjection;
         mediaProjection = null;
         releaseDisplayResources();
         if (projection != null) {
             try { projection.stop(); } catch (Throwable ignored) {}
         }
-        status = "第二畫面已關閉";
+        status = userInitiated ? "第二畫面已手動關閉" : "第二畫面已重建";
+        if (appContext != null) new Prefs(appContext).setVirtualDisplayStopped(status);
     }
 
     private static void releaseDisplayResources() {
@@ -143,17 +170,20 @@ final class VirtualDisplayEngine {
 
     private static Result failAndStore(String message) {
         status = message;
+        if (appContext != null) new Prefs(appContext).setVirtualDisplayStopped(message);
         return Result.fail(message);
     }
 
     private static Result failAndRelease(String message) {
         status = message;
+        intentionalRelease = true;
         MediaProjection projection = mediaProjection;
         mediaProjection = null;
         releaseDisplayResources();
         if (projection != null) {
             try { projection.stop(); } catch (Throwable ignored) {}
         }
+        if (appContext != null) new Prefs(appContext).setVirtualDisplayStopped(message);
         return Result.fail(message);
     }
 
