@@ -18,6 +18,8 @@ final class ShizukuBridge {
     static final int REQUEST_CODE = 6206;
     static final String SHIZUKU_PACKAGE = "moe.shizuku.privileged.api";
     private static final String LINE_PACKAGE = "jp.naver.line.android";
+    private static final String RADAR_PACKAGE = BuildConfig.APPLICATION_ID;
+    private static final String RADAR_SHIELD_COMPONENT = RADAR_PACKAGE + "/.NoReadShieldActivity";
 
     private static final int OP_LAUNCH = 1;
     private static final int OP_ENSURE_DISPLAY = 2;
@@ -202,6 +204,23 @@ final class ShizukuBridge {
         submit(PendingRequest.launch(
             LINE_PACKAGE,
             launch.getComponent().flattenToShortString(),
+            displayId,
+            callback
+        ));
+    }
+
+    static void launchNoReadShieldOnDisplay(int displayId, ResultCallback callback) {
+        if (!permissionGranted()) {
+            post(callback, Result.fail("Shizuku 尚未取得授權"));
+            return;
+        }
+        if (displayId <= 0) {
+            post(callback, Result.fail("無效的第二 Display"));
+            return;
+        }
+        submit(PendingRequest.launch(
+            RADAR_PACKAGE,
+            RADAR_SHIELD_COMPONENT,
             displayId,
             callback
         ));
