@@ -189,10 +189,13 @@ public class ProjectionForegroundService extends Service {
 
         String text;
         int id = VirtualDisplayEngine.displayId();
+        boolean lineVerified = id >= 0
+            && prefs.secondaryLineDisplayId() == id
+            && System.currentTimeMillis() - prefs.secondaryLineSeenAt() <= 15000L;
         if (!ShizukuBridge.binderReady()) text = "Shizuku 未啟動 · 監控暫停";
         else if (!ShizukuBridge.permissionGranted()) text = "等待 Shizuku 授權";
         else if (id < 0) text = "正在建立第二畫面";
-        else if (prefs.virtualDisplayLineVisible()) text = "Display " + id + " · LINE 已驗證 · 背景持續監控";
+        else if (lineVerified) text = "Display " + id + " · LINE 已驗證 · 背景持續監控";
         else text = "Display " + id + " · 等待 LINE 驗證";
 
         Notification.Builder b = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
