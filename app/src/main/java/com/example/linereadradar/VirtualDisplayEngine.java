@@ -14,6 +14,10 @@ final class VirtualDisplayEngine {
         void onResult(Result result);
     }
 
+    // Hidden Android platform flag. It only marks this virtual display as touch-capable;
+    // it does not grant trusted/system display privileges.
+    private static final int VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH = 1 << 6;
+
     private static ImageReader imageReader;
     private static VirtualDisplay virtualDisplay;
     private static HandlerThread drainThread;
@@ -45,7 +49,8 @@ final class VirtualDisplayEngine {
 
             int flags = DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC
                 | DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
-                | DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION;
+                | DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION
+                | VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH;
 
             virtualDisplay = dm.createVirtualDisplay(
                 "LINE-Radar-Shizuku",
@@ -61,7 +66,7 @@ final class VirtualDisplayEngine {
             }
 
             int id = virtualDisplay.getDisplay().getDisplayId();
-            status = "第二畫面已建立 · Display " + id + " · 等待 LINE";
+            status = "第二畫面已建立 · Display " + id + " · 互動模式 ON · 等待 LINE";
             new Prefs(context).setVirtualDisplayRunning(id, status);
             return Result.ok(id, status);
         } catch (Throwable t) {
@@ -88,13 +93,13 @@ final class VirtualDisplayEngine {
         ShizukuBridge.launchLineOnDisplay(app, id, shell -> {
             if (!shell.success) {
                 status = "第二畫面存在，但 Shizuku 無法把 LINE 放進 Display " + id + "：" + shell.message;
-                new Prefs(app).setVirtualDisplayRunning(id, status);
+                new Prefs(app).updateVirtualDisplayStatus(status);
                 if (callback != null) callback.onResult(Result.fail(status));
                 return;
             }
 
-            status = "已用 Shizuku 要求 LINE 啟動到 Display " + id + " · 等待 Accessibility 驗證";
-            new Prefs(app).setVirtualDisplayRunning(id, status);
+            status = "已要求 LINE 進入 Display " + id + " · 等待 Accessibility 驗證";
+            new Prefs(app).updateVirtualDisplayStatus(status);
             if (callback != null) callback.onResult(Result.ok(id, status));
         });
     }
@@ -119,7 +124,7 @@ final class VirtualDisplayEngine {
         status = value == null ? "未知狀態" : value;
         Context ctx = appContext;
         if (ctx != null) {
-            if (displayId() >= 0) new Prefs(ctx).setVirtualDisplayRunning(displayId(), status);
+            if (displayId() >= 0) new Prefs(ctx).updateVirtualDisplayStatus(status);
             else new Prefs(ctx).setVirtualDisplayStopped(status);
         }
     }
