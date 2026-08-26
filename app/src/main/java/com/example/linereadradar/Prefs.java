@@ -19,6 +19,11 @@ final class Prefs {
     private static final String K_LAST_POLL_AT = "last_poll_at";
     private static final String K_POLL_INTERVAL = "poll_interval_ms";
     private static final String K_STATUS = "global_status";
+    private static final String K_VD_RUNNING = "virtual_display_running";
+    private static final String K_VD_ID = "virtual_display_id";
+    private static final String K_VD_STATUS = "virtual_display_status";
+    private static final String K_SECONDARY_LINE_ID = "secondary_line_display_id";
+    private static final String K_SECONDARY_LINE_SEEN_AT = "secondary_line_seen_at";
 
     private final SharedPreferences p;
 
@@ -193,10 +198,7 @@ final class Prefs {
             .apply();
     }
 
-    void setBackgroundEnabled(int index, boolean enabled) {
-        p.edit().putBoolean(k(index, "background"), enabled).apply();
-    }
-
+    void setBackgroundEnabled(int index, boolean enabled) { p.edit().putBoolean(k(index, "background"), enabled).apply(); }
     void setReadEnabled(int index, boolean enabled) { p.edit().putBoolean(k(index, "read"), enabled).apply(); }
     void setMessageEnabled(int index, boolean enabled) { p.edit().putBoolean(k(index, "messages"), enabled).apply(); }
     void setNotifyEnabled(int index, boolean enabled) { p.edit().putBoolean(k(index, "notify"), enabled).apply(); }
@@ -248,10 +250,7 @@ final class Prefs {
     boolean paused() { return p.getBoolean(K_PAUSED, false); }
     boolean backgroundPollingEnabled() { return p.getBoolean(K_BACKGROUND_POLLING, true); }
 
-    void setGlobalEnabled(boolean enabled) {
-        p.edit().putBoolean(K_GLOBAL_ENABLED, enabled).putBoolean(K_PAUSED, false).apply();
-    }
-
+    void setGlobalEnabled(boolean enabled) { p.edit().putBoolean(K_GLOBAL_ENABLED, enabled).putBoolean(K_PAUSED, false).apply(); }
     void setPaused(boolean paused) { p.edit().putBoolean(K_PAUSED, paused).apply(); }
     void setBackgroundPollingEnabled(boolean enabled) { p.edit().putBoolean(K_BACKGROUND_POLLING, enabled).apply(); }
 
@@ -268,6 +267,41 @@ final class Prefs {
 
     String globalStatus() { return p.getString(K_STATUS, "待機中"); }
     void setGlobalStatus(String status) { p.edit().putString(K_STATUS, status).apply(); }
+
+    void setVirtualDisplayRunning(int displayId, String status) {
+        p.edit()
+            .putBoolean(K_VD_RUNNING, true)
+            .putInt(K_VD_ID, displayId)
+            .putString(K_VD_STATUS, status == null ? "第二畫面運作中" : status)
+            .remove(K_SECONDARY_LINE_ID)
+            .remove(K_SECONDARY_LINE_SEEN_AT)
+            .apply();
+    }
+
+    void setVirtualDisplayStopped(String reason) {
+        p.edit()
+            .putBoolean(K_VD_RUNNING, false)
+            .putInt(K_VD_ID, -1)
+            .putString(K_VD_STATUS, reason == null ? "第二畫面已停止" : reason)
+            .remove(K_SECONDARY_LINE_ID)
+            .remove(K_SECONDARY_LINE_SEEN_AT)
+            .apply();
+    }
+
+    boolean virtualDisplayRunning() { return p.getBoolean(K_VD_RUNNING, false); }
+    int virtualDisplayId() { return p.getInt(K_VD_ID, -1); }
+    String virtualDisplayStatus() { return p.getString(K_VD_STATUS, "尚未建立第二畫面"); }
+
+    void markSecondaryLineSeen(int displayId, long now) {
+        p.edit()
+            .putInt(K_SECONDARY_LINE_ID, displayId)
+            .putLong(K_SECONDARY_LINE_SEEN_AT, now)
+            .apply();
+    }
+
+    int secondaryLineDisplayId() { return p.getInt(K_SECONDARY_LINE_ID, -1); }
+    long secondaryLineSeenAt() { return p.getLong(K_SECONDARY_LINE_SEEN_AT, 0L); }
+
     String history() { return p.getString(K_HISTORY, ""); }
 
     void appendHistory(String line) {
