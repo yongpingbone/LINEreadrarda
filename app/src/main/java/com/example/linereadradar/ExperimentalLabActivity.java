@@ -77,7 +77,7 @@ public class ExperimentalLabActivity extends Activity {
         long now = System.currentTimeMillis();
 
         body.addView(text("Radar Lab ✦", 25, true, TEXT));
-        TextView intro = text("這裡是進階診斷頁。背景監控現在拆成 Display、LINE root、目標聊天室三層，不再把『看到 LINE』直接等同於『聊天室持續更新』。", 13, false, MUTED);
+        TextView intro = text("這裡是進階診斷頁。背景監控拆成 Display、LINE root、目標聊天室三層；只有第③層真的定位到啟用中的聊天室，才算背景監控就緒。", 13, false, MUTED);
         intro.setPadding(0, dp(5), 0, dp(15));
         body.addView(intro);
 
@@ -109,10 +109,7 @@ public class ExperimentalLabActivity extends Activity {
             if (!slot.backgroundActive()) continue;
             targetCount++;
             long targetAt = health.targetChatSeenAt(i);
-            boolean targetOk = displayOk
-                && health.targetChatDisplayId(i) == displayId
-                && targetAt > 0
-                && now - targetAt <= 5000L;
+            boolean targetOk = displayOk && health.isTargetRecent(i, displayId, now, prefs);
             status.addView(statusLine(
                 targetOk,
                 "③ 目標聊天室 · " + slot.name,
@@ -154,7 +151,7 @@ public class ExperimentalLabActivity extends Activity {
             "✓ Display 還活著\n" +
             "✓ Shizuku 已連線並授權\n" +
             "✓ 至少一個背景監控對象仍啟用\n\n" +
-            "不再要求 Accessibility 必須先回報 LINE root。即使第②層已經斷掉，第①層還活著時仍會持續嘗試救回 LINE。",
+            "不要求 Accessibility 必須先回報 LINE root。第②層斷掉時，救援仍會繼續。hard refresh 找不到目標時，會先退出目前 LINE 頁面、回到聊天分頁，再有限次掃描聊天列表。",
             12, false, MUTED));
         body.addView(recovery, margin(0, 0, 0, 12));
 
@@ -220,21 +217,21 @@ public class ExperimentalLabActivity extends Activity {
             "① Display alive：第二 Display 本身存在\n" +
             "② LINE root visible：Accessibility 還看得到第二 Display 的 LINE\n" +
             "③ Target chat updating：Radar 真的持續掃得到指定聊天室\n\n" +
-            "只有①或只有①＋②都不能再稱為『持續監控成功』。",
+            "只有①＋②＋③都成立，才會顯示『背景監控就緒』。",
             13, false, MUTED));
         body.addView(success, margin(0, 0, 0, 12));
 
         LinearLayout screenOff = card();
         screenOff.addView(text("息屏測試", 18, true, TEXT));
         screenOff.addView(text(
-            "v0.6 已移除 MediaProjection 依賴，改成非 Root Shizuku + Virtual Display。\n\n" +
+            "v0.6 已移除 MediaProjection 依賴，改成 Shizuku + Virtual Display。\n\n" +
             "息屏後若漏抓，先不要手動打開 LINE。直接進 Radar Lab 截圖『故障時間軸』，就能判斷是 pulse 還活著但 LINE root 斷了、LINE root 還活著但目標聊天室不再更新，或整個 Display/Shizuku 已停止。",
             12, false, MUTED));
         body.addView(screenOff, margin(0, 0, 0, 12));
 
         LinearLayout readProtection = card();
         readProtection.addView(text("No-Read 保護", 18, true, TEXT));
-        readProtection.addView(text("No-Read 與 Shizuku 第二螢幕是不同層。已確認有效的 No-Read 行為維持不變；這次只調整第二 Display 的存活、恢復與診斷鏈路。", 12, false, MUTED));
+        readProtection.addView(text("No-Read 與 Shizuku 第二螢幕是不同層。已確認有效的 No-Read 行為維持不變；這次只調整第二 Display 的尋路、恢復與就緒判定。", 12, false, MUTED));
         body.addView(readProtection, margin(0, 0, 0, 12));
 
         LinearLayout saveCard = card();
