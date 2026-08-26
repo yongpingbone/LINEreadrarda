@@ -37,7 +37,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
     static final String ACTION_BASELINE = "com.example.linereadradar.BASELINE";
 
     private static final String LINE_PACKAGE = "jp.naver.line.android";
-    private static final String CHANNEL_ID = "line_read_radar_events_v053";
+    private static final String CHANNEL_ID = "line_read_radar_events_v056";
     private static final long DEBOUNCE_MS = 250L;
     private static final long WATCHDOG_MS = 700L;
     private static final long REQUEST_TIMEOUT_MS = 15000L;
@@ -447,7 +447,9 @@ public class LineReadAccessibilityService extends AccessibilityService {
         for (int i = start; i < clean.size(); i++) {
             MessageToken token = clean.get(i);
             if (sig.length() > 0) sig.append('|');
-            sig.append(token.top).append(':').append(token.value);
+            // Use only normalized content, not screen coordinates. Opening the same chat can
+            // reposition bubbles; coordinates made the old code falsely report a new message.
+            sig.append(token.value);
         }
         String preview = clean.isEmpty() ? "" : clean.get(clean.size() - 1).value;
         return new ScanResult(
