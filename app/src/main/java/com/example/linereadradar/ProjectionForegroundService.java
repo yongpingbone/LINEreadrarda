@@ -16,13 +16,16 @@ import android.os.PowerManager;
 
 public class ProjectionForegroundService extends Service {
     private static final String ACTION_START = "com.example.linereadradar.START_SHIZUKU_DISPLAY";
-    private static final String CHANNEL_ID = "line_radar_shizuku_display_v060";
+    private static final String CHANNEL_ID = "line_radar_shizuku_display_v061";
     private static final int NOTIFICATION_ID = 7355;
-    private static final long HEALTH_CHECK_MS = 5000L;
+    private static final long HEALTH_CHECK_MS = 2500L;
+    private static final long LINE_RETRY_MS = 4500L;
 
     private Prefs prefs;
     private PowerManager.WakeLock wakeLock;
     private boolean displaySetupInProgress = false;
+    private boolean lineLaunchInProgress = false;
+    private long lastLineLaunchAttemptAt = 0L;
     private final Handler handler = new Handler(Looper.getMainLooper());
 
     private final Runnable healthCheck = new Runnable() {
@@ -44,7 +47,19 @@ public class ProjectionForegroundService extends Service {
 
             if (!VirtualDisplayEngine.alive() && !displaySetupInProgress) {
                 createDisplayAndLaunchLine();
+            } else if (VirtualDisplayEngine.alive()) {
+                int id = VirtualDisplayEngine.displayId();
+                if (isLineVerified(id)) {
+                    prefs.updateVirtualDisplayStatus("Display " + id + " · LINE 已驗證 · 背景監控就緒");
+                } else {
+                    long now = System.currentTimeMillis();
+                    if (!displaySetupInProgress && !lineLaunchInProgress
+                        && now - lastLineLaunchAttemptAt >= LINE_RETRY_MS) {
+                        retryLineLaunch();
+                    }
+                }
             }
+
             updateNotification();
             handler.postDelayed(this, HEALTH_CHECK_MS);
         }
@@ -87,6 +102,8 @@ public class ProjectionForegroundService extends Service {
             VirtualDisplayEngine.setExternalStatus("Shizuku 已啟動 · 等待 Radar 授權");
         } else if (!VirtualDisplayEngine.alive() && !displaySetupInProgress) {
             createDisplayAndLaunchLine();
+        } else if (VirtualDisplayEngine.alive() && !isLineVerified(VirtualDisplayEngine.displayId())) {
+            retryLineLaunch();
         }
 
         handler.removeCallbacks(healthCheck);
@@ -108,27 +125,56 @@ public class ProjectionForegroundService extends Service {
             return;
         }
 
+        lastLineLaunchAttemptAt = System.currentTimeMillis();
+        lineLaunchInProgress = true;
         VirtualDisplayEngine.launchLine(this, launch -> {
             displaySetupInProgress = false;
+            lineLaunchInProgress = false;
             if (!launch.success) {
-                prefs.setVirtualDisplayRunning(display.displayId, launch.message);
+                prefs.updateVirtualDisplayStatus(launch.message);
                 prefs.setGlobalStatus("第二畫面已建立 · LINE 尚未進入");
                 updateNotification();
                 return;
             }
 
-            prefs.setVirtualDisplayRunning(display.displayId,
-                "第二畫面運作中 · Display " + display.displayId + " · 等待 Accessibility 驗證 LINE");
-            prefs.setGlobalStatus("第二畫面持續監控中 · Display " + display.displayId);
+            prefs.updateVirtualDisplayStatus(
+                "Display " + display.displayId + " · LINE 啟動要求已送出 · 等待 Accessibility 驗證");
+            prefs.setGlobalStatus("第二畫面等待 LINE 驗證 · Display " + display.displayId);
             MonitorForegroundService.stop(this);
             updateNotification();
         });
+    }
+
+    private void retryLineLaunch() {
+        int id = VirtualDisplayEngine.displayId();
+        if (id < 0 || lineLaunchInProgress) return;
+        if (isLineVerified(id)) return;
+
+        lastLineLaunchAttemptAt = System.currentTimeMillis();
+        lineLaunchInProgress = true;
+        prefs.updateVirtualDisplayStatus("Display " + id + " · 正在重新送 LINE 到第二畫面");
+        VirtualDisplayEngine.launchLine(this, launch -> {
+            lineLaunchInProgress = false;
+            if (!launch.success) {
+                prefs.updateVirtualDisplayStatus(launch.message);
+            } else if (!isLineVerified(id)) {
+                prefs.updateVirtualDisplayStatus("Display " + id + " · LINE 已重新啟動 · 等待 Accessibility 回報");
+            }
+            updateNotification();
+        });
+    }
+
+    private boolean isLineVerified(int id) {
+        return id >= 0
+            && prefs.secondaryLineDisplayId() == id
+            && System.currentTimeMillis() - prefs.secondaryLineSeenAt() <= 15000L;
     }
 
     @Override
     public void onDestroy() {
         handler.removeCallbacks(healthCheck);
         displaySetupInProgress = false;
+        lineLaunchInProgress = false;
         VirtualDisplayEngine.release();
         releaseWakeLock();
         super.onDestroy();
@@ -175,16 +221,15 @@ public class ProjectionForegroundService extends Service {
 
         String text;
         int id = VirtualDisplayEngine.displayId();
-        boolean lineVerified = id >= 0
-            && prefs.secondaryLineDisplayId() == id
-            && System.currentTimeMillis() - prefs.secondaryLineSeenAt() <= 15000L;
+        boolean lineVerified = isLineVerified(id);
 
         if (!ShizukuBridge.binderReady()) text = "Shizuku 未啟動 · 監控暫停";
         else if (!ShizukuBridge.permissionGranted()) text = "等待 Shizuku 授權";
         else if (displaySetupInProgress) text = "正在建立第二畫面並啟動 LINE";
+        else if (lineLaunchInProgress) text = "Display " + id + " · 正在重新送 LINE";
         else if (id < 0) text = "正在建立第二畫面";
         else if (lineVerified) text = "Display " + id + " · LINE 已驗證 · 背景持續監控";
-        else text = "Display " + id + " · 等待 LINE 驗證";
+        else text = prefs.virtualDisplayStatus();
 
         Notification.Builder b = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
             ? new Notification.Builder(this, CHANNEL_ID)
@@ -193,6 +238,7 @@ public class ProjectionForegroundService extends Service {
         return b.setSmallIcon(R.drawable.ic_notify_chat_star)
             .setContentTitle("LINE Radar · Shizuku 背景模式")
             .setContentText(text)
+            .setStyle(new Notification.BigTextStyle().bigText(text))
             .setContentIntent(pi)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
