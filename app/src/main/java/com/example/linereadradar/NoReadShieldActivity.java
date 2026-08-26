@@ -15,12 +15,10 @@ import android.widget.FrameLayout;
 import java.lang.ref.WeakReference;
 
 /**
- * Transparent focus shield for the Shizuku secondary display.
+ * Retained only as the failed v0.6.16 Activity-shield experiment.
  *
- * The activity is intentionally focusable and translucent. LINE remains rendered underneath,
- * while this Activity becomes the foreground/focused Activity on that display. This prototype is
- * only considered protecting when it is resumed AND owns window focus; merely having an Activity
- * instance alive is not enough evidence for the no-read experiment.
+ * The live v0.6.17 path uses NoReadOverlayShield. Static status helpers delegate to the overlay
+ * first so existing Radar Lab code can keep rendering diagnostics without reviving this Activity.
  */
 public class NoReadShieldActivity extends Activity {
     private static final long HEARTBEAT_MS = 2000L;
@@ -36,17 +34,19 @@ public class NoReadShieldActivity extends Activity {
         @Override
         public void run() {
             if (isFinishing() || isDestroyed()) return;
-            recordState("heartbeat");
+            recordState("legacy-activity-heartbeat");
             handler.postDelayed(this, HEARTBEAT_MS);
         }
     };
 
     static boolean isAliveOnDisplay(int displayId) {
+        if (NoReadOverlayShield.isAliveOnDisplay(displayId)) return true;
         NoReadShieldActivity activity = current.get();
         return activity != null && activity.isAliveOnDisplayInternal(displayId);
     }
 
     static boolean isProtectingOnDisplay(int displayId) {
+        if (NoReadOverlayShield.isProtectingOnDisplay(displayId)) return true;
         NoReadShieldActivity activity = current.get();
         return activity != null
             && activity.isAliveOnDisplayInternal(displayId)
@@ -54,12 +54,12 @@ public class NoReadShieldActivity extends Activity {
             && activity.windowFocused;
     }
 
-    // Kept for existing callers while the prototype migrates from "alive" to "protecting".
     static boolean isActiveOnDisplay(int displayId) {
         return isProtectingOnDisplay(displayId);
     }
 
     static void closeShield() {
+        NoReadOverlayShield.close();
         NoReadShieldActivity activity = current.get();
         if (activity == null) return;
         try {
@@ -79,8 +79,6 @@ public class NoReadShieldActivity extends Activity {
         window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
         window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
 
-        // Do not use FLAG_NOT_TOUCHABLE here. The shield must own focus and consume any accidental
-        // input delivered to the hidden display instead of allowing it to reach LINE underneath.
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(Color.TRANSPARENT);
         root.setClickable(true);
@@ -88,7 +86,7 @@ public class NoReadShieldActivity extends Activity {
         root.setOnTouchListener((v, event) -> true);
         setContentView(root);
 
-        recordState("onCreate");
+        recordState("legacy-activity-onCreate");
         handler.removeCallbacks(heartbeat);
         handler.post(heartbeat);
     }
@@ -98,13 +96,13 @@ public class NoReadShieldActivity extends Activity {
         super.onResume();
         current = new WeakReference<>(this);
         resumed = true;
-        recordState("onResume");
+        recordState("legacy-activity-onResume");
     }
 
     @Override
     protected void onPause() {
         resumed = false;
-        recordState("onPause");
+        recordState("legacy-activity-onPause");
         super.onPause();
     }
 
@@ -112,12 +110,11 @@ public class NoReadShieldActivity extends Activity {
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
         windowFocused = hasFocus;
-        recordState(hasFocus ? "windowFocus=true" : "windowFocus=false");
+        recordState(hasFocus ? "legacy-activity-focus=true" : "legacy-activity-focus=false");
     }
 
     @Override
     public boolean dispatchTouchEvent(MotionEvent event) {
-        // Belt-and-suspenders guard: never pass secondary-display touches through to LINE.
         return true;
     }
 
@@ -126,7 +123,9 @@ public class NoReadShieldActivity extends Activity {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             super.onTopResumedActivityChanged(isTopResumedActivity);
             topResumed = isTopResumedActivity;
-            recordState(isTopResumedActivity ? "topResumed=true" : "topResumed=false");
+            recordState(isTopResumedActivity
+                ? "legacy-activity-topResumed=true"
+                : "legacy-activity-topResumed=false");
         }
     }
 
@@ -136,7 +135,7 @@ public class NoReadShieldActivity extends Activity {
         resumed = false;
         windowFocused = false;
         topResumed = false;
-        recordState("onDestroy");
+        recordState("legacy-activity-onDestroy");
         NoReadShieldActivity activity = current.get();
         if (activity == this) current = new WeakReference<>(null);
         super.onDestroy();
