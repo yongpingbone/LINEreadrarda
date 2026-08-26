@@ -1,6 +1,5 @@
 package com.example.linereadradar;
 
-import android.app.KeyguardManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -13,16 +12,15 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
-import android.os.PowerManager;
 
 public class MonitorForegroundService extends Service {
     static final String ACTION_POLL = "com.example.linereadradar.POLL";
     static final String EXTRA_SLOT = "slot";
 
-    private static final String CHANNEL_ID = "line_read_radar_background_v054";
+    private static final String CHANNEL_ID = "line_read_radar_background_v057";
     private static final int NOTIFICATION_ID = 7310;
-    private static final long HEARTBEAT_MS = 5000L;
-    private static final long RETRY_LOCKED_MS = 15000L;
+    private static final long HEARTBEAT_MS = 2000L;
+    private static final long SINGLE_TARGET_ALIGN_MS = 5000L;
 
     private Prefs prefs;
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -57,18 +55,28 @@ public class MonitorForegroundService extends Service {
                 return;
             }
 
-            PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
-            boolean interactive = pm != null && pm.isInteractive();
-            if (interactive) {
-                prefs.setGlobalStatus("手機使用中 · 背景檢查自動暫停");
+            int displayId = VirtualDisplayEngine.displayId();
+            if (displayId < 0) {
+                // Background mode must not steal the user's main screen. Wait until the
+                // user-approved second display exists instead of launching LINE here.
+                prefs.setGlobalStatus("等待第二畫面 · 背景監控不會搶主畫面");
                 updateNotification();
                 handler.postDelayed(this, HEARTBEAT_MS);
                 return;
             }
 
+            // This is the intended background mode: LINE stays on the second display while
+            // the user is free to use any app on the main display. Accessibility scans the
+            // second display continuously; this heartbeat only re-aligns the requested chat.
+            prefs.setGlobalStatus("🟢 第二畫面持續監控中 · Display " + displayId);
+
             long now = System.currentTimeMillis();
-            long since = now - prefs.lastPollAt();
-            if (since >= prefs.pollIntervalMs()) attemptPoll(now);
+            long alignInterval = prefs.backgroundActiveCount() == 1
+                ? SINGLE_TARGET_ALIGN_MS
+                : Math.max(SINGLE_TARGET_ALIGN_MS, prefs.pollIntervalMs());
+            if (now - prefs.lastPollAt() >= alignInterval) {
+                alignTargetOnSecondDisplay(now);
+            }
 
             updateNotification();
             handler.postDelayed(this, HEARTBEAT_MS);
@@ -128,45 +136,21 @@ public class MonitorForegroundService extends Service {
         return false;
     }
 
-    private void attemptPoll(long now) {
-        if (prefs.backgroundActiveCount() == 0) return;
-
-        KeyguardManager km = (KeyguardManager) getSystemService(KEYGUARD_SERVICE);
-        boolean locked = km != null && km.isDeviceLocked();
-        if (locked) {
-            prefs.setGlobalStatus("手機已安全鎖定 · 等待可檢查時機");
-            long last = prefs.lastPollAt();
-            if (now - last > RETRY_LOCKED_MS) {
-                prefs.setLastPollAt(now - prefs.pollIntervalMs() + RETRY_LOCKED_MS);
-            }
-            return;
-        }
-
+    private void alignTargetOnSecondDisplay(long now) {
         int slot = prefs.nextBackgroundSlot();
         if (slot < 0) return;
+
         Prefs.Slot s = prefs.slot(slot);
         prefs.setLastPollAt(now);
-        prefs.setGlobalStatus("背景準備檢查「" + s.name + "」");
-        prefs.markChecked(slot, now, "背景檢查準備中");
+        prefs.markChecked(slot, now, "第二畫面持續監控中");
 
         Intent command = new Intent(ACTION_POLL);
         command.setPackage(getPackageName());
         command.putExtra(EXTRA_SLOT, slot);
         sendBroadcast(command);
 
-        Intent launch = getPackageManager().getLaunchIntentForPackage("jp.naver.line.android");
-        if (launch != null) {
-            launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
-            try {
-                startActivity(launch);
-            } catch (Exception ignored) {
-                prefs.markChecked(slot, now, "Android 阻擋背景開啟 LINE");
-                prefs.setGlobalStatus("Android 阻擋背景開啟 LINE · 等待下次");
-            }
-        } else {
-            prefs.markChecked(slot, now, "找不到 LINE App");
-            prefs.setGlobalStatus("找不到 LINE App");
-        }
+        // Do NOT start LINE on the main display here. The whole point of background mode is
+        // that the second display keeps LINE alive while the user keeps using the main screen.
     }
 
     private void ensureChannel() {
@@ -174,10 +158,10 @@ public class MonitorForegroundService extends Service {
             NotificationManager nm = getSystemService(NotificationManager.class);
             NotificationChannel channel = new NotificationChannel(
                 CHANNEL_ID,
-                "監控狀態",
+                "背景持續監控",
                 NotificationManager.IMPORTANCE_LOW
             );
-            channel.setDescription("LINE Radar 首次設定與背景檢查狀態");
+            channel.setDescription("LINE Radar 使用第二畫面持續監控，不影響主畫面使用");
             nm.createNotificationChannel(channel);
         }
     }
@@ -190,9 +174,15 @@ public class MonitorForegroundService extends Service {
         PendingIntent pendingIntent = PendingIntent.getActivity(this, 20, openApp, pendingFlags);
 
         String detail;
-        if (prefs.paused()) detail = "全部監控已暫停";
-        else if (hasUnarmedActiveSlot()) detail = "首次設定中 · 到 LINE 選擇指定聊天室即可";
-        else detail = prefs.globalStatus() + " · " + prefs.backgroundActiveCount() + " 位背景 ON";
+        if (prefs.paused()) {
+            detail = "全部監控已暫停";
+        } else if (hasUnarmedActiveSlot()) {
+            detail = "首次設定中 · 到 LINE 選擇指定聊天室即可";
+        } else if (VirtualDisplayEngine.displayId() >= 0) {
+            detail = "第二畫面持續監控中 · 主畫面可正常使用";
+        } else {
+            detail = "等待建立第二畫面 · 不會搶主畫面";
+        }
 
         Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
             ? new Notification.Builder(this, CHANNEL_ID)
