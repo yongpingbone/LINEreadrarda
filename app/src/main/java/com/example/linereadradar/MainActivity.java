@@ -20,6 +20,7 @@ import android.view.View;
 import android.view.Window;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Switch;
@@ -123,9 +124,12 @@ public class MainActivity extends Activity {
         LinearLayout header = row();
         TextView title = text("LINE Radar", 26, true, TEXT);
         header.addView(title, new LinearLayout.LayoutParams(0, dp(52), 1f));
-        TextView star = text("✦", 27, false, PURPLE);
-        star.setGravity(Gravity.CENTER);
-        header.addView(star, new LinearLayout.LayoutParams(dp(52), dp(52)));
+        ImageView appIcon = new ImageView(this);
+        appIcon.setImageResource(R.mipmap.ic_launcher);
+        appIcon.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        appIcon.setPadding(dp(4), dp(4), dp(4), dp(4));
+        appIcon.setContentDescription("LINE Radar");
+        header.addView(appIcon, new LinearLayout.LayoutParams(dp(52), dp(52)));
         root.addView(header);
 
         pageHost = new LinearLayout(this);
@@ -367,6 +371,17 @@ public class MainActivity extends Activity {
         lab.setOnClickListener(v -> startActivity(new Intent(this, ExperimentalLabActivity.class)));
         environment.addView(lab, marginLp(0, 10, 0, 0));
         pageHost.addView(environment, marginLp(0, 0, 0, 12));
+
+        LinearLayout notificationRules = card(CARD);
+        notificationRules.addView(text("通知規則", 16, true, TEXT));
+        notificationRules.addView(text(
+            "會跳通知：\n" +
+            "✓ 已讀提醒\n" +
+            "✓ 新訊息\n" +
+            "✓ 監控中斷\n\n" +
+            "背景運作、Display 狀態、LINE 驗證、heartbeat、重新對準、Shizuku 正常狀態都不會彈出。Android 必要的前景服務通知只會靜默存在，不震動、不發聲。",
+            12, false, MUTED));
+        pageHost.addView(notificationRules, marginLp(0, 0, 0, 12));
 
         if (prefs.count() > 0) {
             LinearLayout pauseCard = card(CARD);
