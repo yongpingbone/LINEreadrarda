@@ -39,17 +39,20 @@ public class LineReadAccessibilityService extends AccessibilityService {
     private static final String LINE_PACKAGE = "jp.naver.line.android";
     private static final String CHANNEL_ID = "line_read_radar_events_v069";
     private static final long DEBOUNCE_MS = 250L;
-    private static final long WATCHDOG_MS = 700L;
-    private static final long REQUEST_TIMEOUT_MS = 25000L;
+    private static final long WATCHDOG_MS = 800L;
+    private static final long REQUEST_TIMEOUT_MS = 18000L;
     private static final long MANUAL_SESSION_GAP_MS = 1600L;
     private static final long MANUAL_STABLE_MS = 1000L;
     private static final long SECONDARY_DIAGNOSTIC_MS = 1500L;
-    private static final long NAVIGATION_COOLDOWN_MS = 650L;
-    private static final long TARGET_OPEN_WAIT_MS = 1500L;
-    private static final int MAX_BACK_STEPS = 3;
-    private static final int MAX_CHAT_TAB_TAP_ATTEMPTS = 2;
-    private static final int MAX_SCROLL_TO_TOP_STEPS = 4;
-    private static final int MAX_SCROLL_FORWARD_STEPS = 10;
+    private static final long NAVIGATION_COOLDOWN_MS = 1600L;
+    private static final long NAVIGATION_CALLBACK_TIMEOUT_MS = 3500L;
+    private static final long NAVIGATION_CIRCUIT_BREAKER_MS = 60000L;
+    private static final long TARGET_OPEN_WAIT_MS = 1800L;
+    private static final int MAX_BACK_STEPS = 1;
+    private static final int MAX_CHAT_TAB_TAP_ATTEMPTS = 1;
+    private static final int MAX_SCROLL_TO_TOP_STEPS = 2;
+    private static final int MAX_SCROLL_FORWARD_STEPS = 4;
+    private static final int MAX_NAVIGATION_ACTIONS_PER_REQUEST = 8;
 
     private static final Pattern TIME_LIKE = Pattern.compile(
         "^(上午|下午|AM|PM|am|pm|오전|오후)?\\s*\\d{1,2}:\\d{2}$|^\\d{1,2}/\\d{1,2}$|^昨天$|^今天$|^Yesterday$|^Today$|^昨日$|^今日$|^어제$|^오늘$"
@@ -86,9 +89,12 @@ public class LineReadAccessibilityService extends AccessibilityService {
     private int requestBackSteps = 0;
     private int requestScrollToTopSteps = 0;
     private int requestScrollForwardSteps = 0;
+    private int requestNavigationActions = 0;
     private long requestLastNavigationAt = 0L;
     private long requestTargetClickAt = 0L;
+    private long navigationCircuitOpenUntil = 0L;
     private boolean navigationActionInProgress = false;
+    private int navigationActionToken = 0;
     private int requestSerial = 0;
 
     private int manualVisibleSlot = -1;
@@ -120,8 +126,9 @@ public class LineReadAccessibilityService extends AccessibilityService {
             prefs.setGlobalStatus("尚未找到「" + slot.name + "」聊天室");
             Toast.makeText(this, "沒有找到「" + slot.name + "」聊天室，請再試一次", Toast.LENGTH_LONG).show();
         } else {
-            prefs.markChecked(requestedSlot, now, "第二畫面尋路逾時 · 尚未找到聊天室");
-            prefs.setGlobalStatus("LINE 已開啟，但尚未定位到「" + slot.name + "」");
+            navigationCircuitOpenUntil = now + NAVIGATION_CIRCUIT_BREAKER_MS;
+            prefs.markChecked(requestedSlot, now, "第二畫面定位逾時 · 已暫停自動操作 60 秒");
+            prefs.setGlobalStatus("自動定位已暫停 60 秒 · 避免系統不穩定");
         }
         clearRequest(false);
     };
@@ -135,8 +142,16 @@ public class LineReadAccessibilityService extends AccessibilityService {
 
             int slot = intent.getIntExtra(MonitorForegroundService.EXTRA_SLOT, -1);
             if (slot < 0 || slot >= Prefs.MAX_SLOTS) return;
+
+            long now = System.currentTimeMillis();
+            if (MonitorForegroundService.ACTION_POLL.equals(action) && now < navigationCircuitOpenUntil) {
+                long remainSec = Math.max(1L, (navigationCircuitOpenUntil - now + 999L) / 1000L);
+                prefs.markChecked(slot, now, "自動定位保護中 · " + remainSec + " 秒後再試");
+                return;
+            }
+
             requestedSlot = slot;
-            requestStartedAt = System.currentTimeMillis();
+            requestStartedAt = now;
             clickedTargetDuringRequest = false;
             baselineRequest = ACTION_BASELINE.equals(action);
             requestSerial++;
@@ -191,6 +206,8 @@ public class LineReadAccessibilityService extends AccessibilityService {
     public void onDestroy() {
         handler.removeCallbacks(timeoutRunnable);
         handler.removeCallbacks(watchdogRunnable);
+        navigationActionToken++;
+        navigationActionInProgress = false;
         try { unregisterReceiver(requestReceiver); } catch (Exception ignored) {}
         super.onDestroy();
     }
@@ -258,6 +275,11 @@ public class LineReadAccessibilityService extends AccessibilityService {
             return;
         }
 
+        if (requestNavigationActions >= MAX_NAVIGATION_ACTIONS_PER_REQUEST) {
+            openNavigationCircuit(slot, now, "本輪導航已達安全上限");
+            return;
+        }
+
         if (!requestChatsTabOpened) {
             Rect chatsBounds = findChatsTabBounds(root);
             if (chatsBounds != null && requestChatsTabTapAttempts < MAX_CHAT_TAB_TAP_ATTEMPTS) {
@@ -279,8 +301,6 @@ public class LineReadAccessibilityService extends AccessibilityService {
                 return;
             }
 
-            // Back 已有限次嘗試。若底部分頁有 bounds，就再試一次 Chats；
-            // 否則將目前 LINE root 視為可能的聊天列表，進入 bounded scroll。
             if (chatsBounds != null) {
                 sendSecondaryTap(slot, displayId, chatsBounds, "CHATS_TAB_FINAL_TAP", now,
                     () -> {
@@ -308,8 +328,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
             return;
         }
 
-        prefs.markChecked(slot.index, now, "已掃描聊天列表 · 尚未看到「" + slot.name + "」");
-        if (now - requestStartedAt > REQUEST_TIMEOUT_MS) timeoutRunnable.run();
+        openNavigationCircuit(slot, now, "已完成安全範圍掃描但尚未看到目標");
     }
 
     private void sendSecondaryTap(Prefs.Slot slot, int displayId, Rect bounds,
@@ -318,19 +337,16 @@ public class LineReadAccessibilityService extends AccessibilityService {
         int x = Math.max(0, bounds.centerX());
         int y = Math.max(0, bounds.centerY());
         int serial = requestSerial;
-        navigationActionInProgress = true;
-        requestLastNavigationAt = now;
+        int token = beginNavigationAction(slot, displayId, action, now);
         ShizukuBridge.tapOnDisplay(displayId, x, y, result -> {
             long at = System.currentTimeMillis();
             health.markNavigation(displayId, action + " @ " + x + "," + y,
                 result.success, result.message, at);
-            if (serial != requestSerial || requestedSlot != slot.index) return;
-            navigationActionInProgress = false;
-            requestLastNavigationAt = at;
+            if (!acceptNavigationCallback(serial, slot.index, token, at)) return;
             if (result.success) {
                 if (onSuccess != null) onSuccess.run();
             } else {
-                prefs.markChecked(slot.index, at, "第二畫面導航失敗 · " + action);
+                openNavigationCircuit(slot, at, "第二畫面點擊失敗 · " + action);
             }
         });
     }
@@ -338,21 +354,18 @@ public class LineReadAccessibilityService extends AccessibilityService {
     private void sendSecondaryBack(Prefs.Slot slot, int displayId, long now) {
         int serial = requestSerial;
         int attempt = requestBackSteps + 1;
-        navigationActionInProgress = true;
-        requestLastNavigationAt = now;
+        String action = "BACK " + attempt + "/" + MAX_BACK_STEPS;
+        int token = beginNavigationAction(slot, displayId, action, now);
         ShizukuBridge.backOnDisplay(displayId, result -> {
             long at = System.currentTimeMillis();
-            health.markNavigation(displayId, "BACK " + attempt + "/" + MAX_BACK_STEPS,
-                result.success, result.message, at);
-            if (serial != requestSerial || requestedSlot != slot.index) return;
-            navigationActionInProgress = false;
-            requestLastNavigationAt = at;
+            health.markNavigation(displayId, action, result.success, result.message, at);
+            if (!acceptNavigationCallback(serial, slot.index, token, at)) return;
             if (result.success) {
                 requestBackSteps++;
                 prefs.markChecked(slot.index, at,
                     "第二畫面返回上一層 · " + requestBackSteps + "/" + MAX_BACK_STEPS);
             } else {
-                prefs.markChecked(slot.index, at, "第二畫面 BACK 失敗");
+                openNavigationCircuit(slot, at, "第二畫面 BACK 失敗");
             }
         });
     }
@@ -373,16 +386,14 @@ public class LineReadAccessibilityService extends AccessibilityService {
         int serial = requestSerial;
         String action = towardTop ? "SCROLL_TO_TOP" : "SCROLL_FORWARD";
         int step = towardTop ? requestScrollToTopSteps + 1 : requestScrollForwardSteps + 1;
+        String actionWithStep = action + " " + step;
+        int token = beginNavigationAction(slot, displayId, actionWithStep, now);
 
-        navigationActionInProgress = true;
-        requestLastNavigationAt = now;
-        ShizukuBridge.swipeOnDisplay(displayId, x, startY, x, endY, 260, result -> {
+        ShizukuBridge.swipeOnDisplay(displayId, x, startY, x, endY, 220, result -> {
             long at = System.currentTimeMillis();
-            health.markNavigation(displayId, action + " " + step,
+            health.markNavigation(displayId, actionWithStep,
                 result.success, result.message, at);
-            if (serial != requestSerial || requestedSlot != slot.index) return;
-            navigationActionInProgress = false;
-            requestLastNavigationAt = at;
+            if (!acceptNavigationCallback(serial, slot.index, token, at)) return;
             if (result.success) {
                 if (towardTop) {
                     requestScrollToTopSteps++;
@@ -394,9 +405,43 @@ public class LineReadAccessibilityService extends AccessibilityService {
                         "聊天列表搜尋中 · " + requestScrollForwardSteps + "/" + MAX_SCROLL_FORWARD_STEPS);
                 }
             } else {
-                prefs.markChecked(slot.index, at, "第二畫面滑動失敗 · " + action);
+                openNavigationCircuit(slot, at, "第二畫面滑動失敗 · " + action);
             }
         });
+    }
+
+    private int beginNavigationAction(Prefs.Slot slot, int displayId, String action, long now) {
+        navigationActionInProgress = true;
+        requestLastNavigationAt = now;
+        requestNavigationActions++;
+        int serial = requestSerial;
+        int token = ++navigationActionToken;
+
+        handler.postDelayed(() -> {
+            if (serial != requestSerial || requestedSlot != slot.index) return;
+            if (!navigationActionInProgress || token != navigationActionToken) return;
+            long at = System.currentTimeMillis();
+            navigationActionInProgress = false;
+            navigationActionToken++;
+            health.markNavigation(displayId, action, false, "callback timeout", at);
+            openNavigationCircuit(slot, at, "第二畫面導航逾時 · 已停止自動操作");
+        }, NAVIGATION_CALLBACK_TIMEOUT_MS);
+        return token;
+    }
+
+    private boolean acceptNavigationCallback(int serial, int slotIndex, int token, long at) {
+        if (serial != requestSerial || requestedSlot != slotIndex || token != navigationActionToken) return false;
+        navigationActionInProgress = false;
+        navigationActionToken++;
+        requestLastNavigationAt = at;
+        return true;
+    }
+
+    private void openNavigationCircuit(Prefs.Slot slot, long now, String reason) {
+        navigationCircuitOpenUntil = now + NAVIGATION_CIRCUIT_BREAKER_MS;
+        prefs.markChecked(slot.index, now, reason + " · 60 秒後自動再試");
+        prefs.setGlobalStatus("自動定位暫停 60 秒 · 保護手機穩定性");
+        clearRequest(false);
     }
 
     private Rect findTargetBounds(AccessibilityNodeInfo root, String target) {
@@ -683,6 +728,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
         clickedTargetDuringRequest = false;
         baselineRequest = false;
         requestSerial++;
+        navigationActionToken++;
         resetRequestNavigationState();
         handler.removeCallbacks(timeoutRunnable);
         if (returnHome) handler.postDelayed(() -> performGlobalAction(GLOBAL_ACTION_HOME), 550L);
@@ -694,6 +740,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
         requestBackSteps = 0;
         requestScrollToTopSteps = 0;
         requestScrollForwardSteps = 0;
+        requestNavigationActions = 0;
         requestLastNavigationAt = 0L;
         requestTargetClickAt = 0L;
         navigationActionInProgress = false;
