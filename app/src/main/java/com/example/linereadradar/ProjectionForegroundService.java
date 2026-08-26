@@ -21,6 +21,7 @@ public class ProjectionForegroundService extends Service {
     private static final long HEALTH_CHECK_MS = 2500L;
     private static final long LINE_RETRY_MS = 4500L;
     private static final long LINE_PULSE_MS = 2500L;
+    private static final long POLL_OPEN_DELAY_MS = 650L;
 
     private Prefs prefs;
     private PowerManager.WakeLock wakeLock;
@@ -28,6 +29,7 @@ public class ProjectionForegroundService extends Service {
     private boolean displayQueryInProgress = false;
     private boolean lineLaunchInProgress = false;
     private boolean linePulseInProgress = false;
+    private boolean secondaryPollInProgress = false;
     private long lastLineLaunchAttemptAt = 0L;
     private long lastLinePulseAt = 0L;
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -119,6 +121,7 @@ public class ProjectionForegroundService extends Service {
                     "Display " + id + " · LINE 已驗證 · 背景＋息屏監控就緒");
                 prefs.setGlobalStatus("背景＋息屏持續監控中 · Display " + id);
                 pulseLineTask(id);
+                maybeHardRefreshMonitoredChat(id);
             } else {
                 long now = System.currentTimeMillis();
                 if (!lineLaunchInProgress && now - lastLineLaunchAttemptAt >= LINE_RETRY_MS) {
@@ -131,7 +134,8 @@ public class ProjectionForegroundService extends Service {
 
     private void pulseLineTask(int id) {
         long now = System.currentTimeMillis();
-        if (id <= 0 || linePulseInProgress || now - lastLinePulseAt < LINE_PULSE_MS) return;
+        if (id <= 0 || linePulseInProgress || secondaryPollInProgress
+            || now - lastLinePulseAt < LINE_PULSE_MS) return;
 
         lastLinePulseAt = now;
         linePulseInProgress = true;
@@ -148,6 +152,41 @@ public class ProjectionForegroundService extends Service {
             if (!lineLaunchInProgress && retryNow - lastLineLaunchAttemptAt >= LINE_RETRY_MS) {
                 retryLineLaunch();
             }
+        });
+    }
+
+    private void maybeHardRefreshMonitoredChat(int id) {
+        if (id <= 0 || secondaryPollInProgress || lineLaunchInProgress) return;
+        if (prefs.backgroundActiveCount() <= 0) return;
+
+        long now = System.currentTimeMillis();
+        if (now - prefs.lastPollAt() < prefs.pollIntervalMs()) return;
+
+        int slot = prefs.nextBackgroundSlot();
+        if (slot < 0) return;
+
+        Prefs.Slot target = prefs.slot(slot);
+        prefs.setLastPollAt(now);
+        prefs.markChecked(slot, now, "第二畫面重新對準中");
+        secondaryPollInProgress = true;
+
+        VirtualDisplayEngine.launchLine(this, launch -> {
+            if (!launch.success) {
+                secondaryPollInProgress = false;
+                prefs.markChecked(slot, System.currentTimeMillis(), "第二畫面重新對準失敗");
+                prefs.updateVirtualDisplayStatus(
+                    "Display " + id + " · 無法重新喚醒 LINE · " + launch.message);
+                return;
+            }
+
+            handler.postDelayed(() -> {
+                Intent command = new Intent(MonitorForegroundService.ACTION_POLL);
+                command.setPackage(getPackageName());
+                command.putExtra(MonitorForegroundService.EXTRA_SLOT, slot);
+                sendBroadcast(command);
+                prefs.setGlobalStatus("第二畫面重新對準「" + target.name + "」");
+                secondaryPollInProgress = false;
+            }, POLL_OPEN_DELAY_MS);
         });
     }
 
@@ -219,6 +258,7 @@ public class ProjectionForegroundService extends Service {
         displayQueryInProgress = false;
         lineLaunchInProgress = false;
         linePulseInProgress = false;
+        secondaryPollInProgress = false;
 
         // Deliberately DO NOT release the Shizuku-owned Virtual Display here.
         // Android may recreate this foreground service while the phone is locked.
@@ -255,7 +295,7 @@ public class ProjectionForegroundService extends Service {
                 "背景與息屏監控",
                 NotificationManager.IMPORTANCE_MIN
             );
-            channel.setDescription("維持非 Root Shizuku 第二 Display 與 LINE task heartbeat");
+            channel.setDescription("維持非 Root Shizuku 第二 Display、LINE task heartbeat 與重新對準");
             nm.createNotificationChannel(channel);
         }
     }
@@ -274,6 +314,7 @@ public class ProjectionForegroundService extends Service {
         else if (!ShizukuBridge.permissionGranted()) text = "等待 Shizuku 授權";
         else if (displaySetupInProgress) text = "正在建立 Always-unlocked 第二畫面";
         else if (displayQueryInProgress && id < 0) text = "正在接回 Shizuku 第二畫面";
+        else if (secondaryPollInProgress) text = "Display " + id + " · 正在重新對準聊天室";
         else if (lineLaunchInProgress) text = "Display " + id + " · 正在確認 LINE";
         else if (linePulseInProgress) text = "Display " + id + " · LINE task heartbeat";
         else if (id < 0) text = "正在建立第二畫面";
