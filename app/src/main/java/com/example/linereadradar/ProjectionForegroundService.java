@@ -18,7 +18,7 @@ public class ProjectionForegroundService extends Service {
     private static final String ACTION_STOP = "com.example.linereadradar.STOP_PROJECTION";
     private static final String EXTRA_RESULT_CODE = "projection_result_code";
     private static final String EXTRA_RESULT_DATA = "projection_result_data";
-    private static final String CHANNEL_ID = "line_radar_projection_v055";
+    private static final String CHANNEL_ID = "line_radar_projection_v057";
     private static final int NOTIFICATION_ID = 7355;
 
     public static void start(Context context, int resultCode, Intent resultData) {
@@ -95,7 +95,15 @@ public class ProjectionForegroundService extends Service {
                 stopSelf();
                 return START_NOT_STICKY;
             }
-            VirtualDisplayEngine.createWithProjection(this, projection);
+
+            VirtualDisplayEngine.Result result = VirtualDisplayEngine.createWithProjection(this, projection);
+            if (result.success) {
+                Prefs prefs = new Prefs(this);
+                if (prefs.globalEnabled() && prefs.backgroundActiveCount() > 0 && !prefs.paused()) {
+                    prefs.setGlobalStatus("🟢 第二畫面持續監控中 · Display " + result.displayId);
+                    MonitorForegroundService.start(this);
+                }
+            }
         } catch (Throwable t) {
             VirtualDisplayEngine.setExternalStatus(t.getClass().getSimpleName() + ": " + safe(t.getMessage()));
             stopForeground(true);
@@ -118,10 +126,10 @@ public class ProjectionForegroundService extends Service {
             NotificationManager nm = getSystemService(NotificationManager.class);
             NotificationChannel channel = new NotificationChannel(
                 CHANNEL_ID,
-                "Virtual Display 測試",
+                "Virtual Display 持續監控",
                 NotificationManager.IMPORTANCE_LOW
             );
-            channel.setDescription("使用 Android 螢幕分享授權建立 Radar 實驗第二畫面");
+            channel.setDescription("維持 LINE Radar 第二畫面，讓主畫面可正常使用其他 App");
             nm.createNotificationChannel(channel);
         }
     }
@@ -135,8 +143,8 @@ public class ProjectionForegroundService extends Service {
             ? new Notification.Builder(this, CHANNEL_ID)
             : new Notification.Builder(this);
         return b.setSmallIcon(R.drawable.ic_notify_chat_star)
-            .setContentTitle("LINE Radar · Display 測試中")
-            .setContentText("Android 螢幕分享授權使用中")
+            .setContentTitle("LINE Radar · 第二畫面運作中")
+            .setContentText("LINE 可留在第二 Display，主畫面可正常使用")
             .setContentIntent(pi)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
