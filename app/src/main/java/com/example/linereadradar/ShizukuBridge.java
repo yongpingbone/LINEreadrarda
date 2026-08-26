@@ -23,6 +23,7 @@ final class ShizukuBridge {
     private static final int OP_ENSURE_DISPLAY = 2;
     private static final int OP_QUERY_DISPLAY = 3;
     private static final int OP_RELEASE_DISPLAY = 4;
+    private static final int OP_PULSE_LINE = 5;
 
     interface ResultCallback {
         void onResult(Result result);
@@ -145,6 +146,18 @@ final class ShizukuBridge {
         submit(PendingRequest.releaseDisplay(callback));
     }
 
+    static void pulseLineOnDisplay(int displayId, ResultCallback callback) {
+        if (!permissionGranted()) {
+            post(callback, Result.fail("Shizuku 尚未取得授權"));
+            return;
+        }
+        if (displayId <= 0) {
+            post(callback, Result.fail("無效的第二 Display"));
+            return;
+        }
+        submit(PendingRequest.pulseLine(displayId, callback));
+    }
+
     static void launchLineOnDisplay(Context context, int displayId, ResultCallback callback) {
         if (!permissionGranted()) {
             post(callback, Result.fail("Shizuku 尚未取得授權"));
@@ -235,6 +248,11 @@ final class ShizukuBridge {
                         result = Result.ok(-1, "Shizuku 第二 Display 已釋放");
                         break;
                     }
+                    case OP_PULSE_LINE: {
+                        String raw = service.pulseAppTaskOnDisplay(LINE_PACKAGE, request.displayId);
+                        result = parseLaunch(raw);
+                        break;
+                    }
                     case OP_LAUNCH:
                     default: {
                         String raw = service.startActivityOnDisplay(
@@ -259,9 +277,9 @@ final class ShizukuBridge {
         if (raw == null) return Result.fail("Shizuku UserService 沒有回傳結果");
         if (raw.startsWith("OK")) {
             String detail = raw.length() > 2 ? raw.substring(2).trim() : "";
-            return Result.ok(-1, detail.isEmpty() ? "LINE launch completed" : detail);
+            return Result.ok(-1, detail.isEmpty() ? "operation completed" : detail);
         }
-        return Result.fail(raw.trim().isEmpty() ? "LINE launch failed" : raw.trim());
+        return Result.fail(raw.trim().isEmpty() ? "operation failed" : raw.trim());
     }
 
     private static void failPending(String message) {
@@ -326,6 +344,11 @@ final class ShizukuBridge {
 
         static PendingRequest releaseDisplay(ResultCallback callback) {
             return new PendingRequest(OP_RELEASE_DISPLAY, null, null, -1, 0, 0, 0, callback);
+        }
+
+        static PendingRequest pulseLine(int displayId, ResultCallback callback) {
+            return new PendingRequest(OP_PULSE_LINE, LINE_PACKAGE, null, displayId,
+                0, 0, 0, callback);
         }
     }
 
