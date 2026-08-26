@@ -7,7 +7,6 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.media.projection.MediaProjectionManager;
-import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -18,7 +17,6 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
-import android.widget.Toast;
 
 public class ExperimentalLabActivity extends Activity {
     private static final int BG = Color.rgb(6, 10, 28);
@@ -32,6 +30,7 @@ public class ExperimentalLabActivity extends Activity {
 
     private Prefs prefs;
     private TextView displayState;
+    private TextView nextStep;
     private MediaProjectionManager projectionManager;
     private final Handler handler = new Handler(Looper.getMainLooper());
 
@@ -63,50 +62,50 @@ public class ExperimentalLabActivity extends Activity {
         scroll.addView(body);
 
         body.addView(text("Radar Lab ✦", 25, true, TEXT));
-        TextView intro = text("測試 LINE 能不能留在第二畫面。新版會先使用 Android 官方螢幕分享授權建立 Public Virtual Display。", 13, false, MUTED);
+        TextView intro = text("這裡只處理第二螢幕。成功後，LINE 可以留在第二 Display，主畫面可照常使用其他 App，不需要懸浮視窗。", 13, false, MUTED);
         intro.setPadding(0, dp(5), 0, dp(15));
         body.addView(intro);
 
+        LinearLayout statusCard = card();
+        statusCard.addView(text("目前狀態", 19, true, TEXT));
+        displayState = text("尚未建立第二螢幕", 16, true, AMBER);
+        displayState.setPadding(0, dp(10), 0, dp(5));
+        statusCard.addView(displayState);
+        nextStep = text("按下面的「啟動第二螢幕」開始。", 13, false, MUTED);
+        statusCard.addView(nextStep);
+        body.addView(statusCard, margin(0, 0, 0, 12));
+
         LinearLayout display = card();
-        display.addView(text("Virtual Display 測試", 19, true, TEXT));
-        display.addView(text("按一次即可。Android 會先跳出螢幕分享／錄製授權視窗；如果可以選範圍，請選「整個螢幕」，再按允許。Radar 接著才會建立第二 Display 並嘗試啟動 LINE。", 13, false, MUTED));
-        TextView privacy = text("注意：這個授權會讓 Android 顯示正在分享／錄製螢幕的系統提示。Radar 只用授權建立實驗 Display，畫面幀會立即丟棄，不寫入檔案。", 12, true, AMBER);
-        privacy.setPadding(0, dp(8), 0, 0);
-        display.addView(privacy);
+        display.addView(text("啟動第二螢幕", 18, true, TEXT));
+        display.addView(text("Android 會跳出螢幕分享／錄製授權。如果可以選範圍，選「整個螢幕」後按允許。Radar 只用這個授權建立實驗 Display，不會儲存影片。", 12, false, MUTED));
 
-        displayState = text("尚未測試", 14, true, AMBER);
-        displayState.setPadding(0, dp(12), 0, dp(12));
-        display.addView(displayState);
-
-        Button oneTap = button("一鍵開始 Display 測試");
+        Button oneTap = button("啟動第二螢幕");
         oneTap.setOnClickListener(v -> requestProjectionAndRun());
-        display.addView(oneTap);
+        display.addView(oneTap, margin(0, 12, 0, 0));
 
-        Button stop = quietButton("停止 Display 測試");
+        Button stop = quietButton("停止第二螢幕");
         stop.setOnClickListener(v -> {
             ProjectionForegroundService.stop(this);
             VirtualDisplayEngine.release();
-            displayState.setText("第二畫面已關閉");
-            displayState.setTextColor(AMBER);
+            prefs.setVirtualDisplayStopped("第二畫面已手動關閉");
+            refreshDisplayState();
         });
         display.addView(stop, margin(0, 8, 0, 0));
         body.addView(display, margin(0, 0, 0, 12));
 
+        LinearLayout lockWarning = card();
+        lockWarning.addView(text("⚠ 關螢幕／鎖屏限制", 17, true, AMBER));
+        lockWarning.addView(text("目前這個版本的第二 Display 是 MediaProjection。Android 會在螢幕鎖定時停止 MediaProjection，所以鎖屏後這個第二螢幕會中斷。這不是省電設定造成的。真正的息屏持續監控需要改用 Shizuku / shell virtual display。", 12, false, MUTED));
+        body.addView(lockWarning, margin(0, 0, 0, 12));
+
         LinearLayout readProtection = card();
         readProtection.addView(text("No-Read 保護", 18, true, TEXT));
-        readProtection.addView(text("Virtual Display 成功不代表 No-Read 已生效。No-Read 仍需要 LSPosed / LSPatch 類框架把實驗 hook 載入 LINE，最後還必須由另一個帳號確認真的沒有出現已讀。", 12, false, MUTED));
-        Button explain = quietButton("看懂 No-Read 是什麼");
-        explain.setOnClickListener(v -> new AlertDialog.Builder(this)
-            .setTitle("No-Read 的作用")
-            .setMessage("Virtual Display 負責把 LINE 放到第二畫面。No-Read 則嘗試阻止 Radar 在第二畫面查看聊天室時造成的已讀。\n\n兩者是不同層，所以要先把 Display 測通，再驗證 No-Read。")
-            .setPositiveButton("知道了", null)
-            .show());
-        readProtection.addView(explain, margin(0, 8, 0, 0));
+        readProtection.addView(text("你已實機確認目前監控過程不會讓對方看到你已讀。這部分先維持，不再改動。", 12, false, MUTED));
         body.addView(readProtection, margin(0, 0, 0, 12));
 
         LinearLayout saveCard = card();
         saveCard.addView(text("每個人的訊息保存", 18, true, TEXT));
-        saveCard.addView(text("通知可以顯示最新訊息；這個開關只決定是否把正文永久寫進 Radar 歷史紀錄。", 12, false, MUTED));
+        saveCard.addView(text("通知可顯示最新訊息；下面的開關只決定是否把正文永久寫進 Radar 歷史紀錄。", 12, false, MUTED));
         int found = 0;
         for (int i = 0; i < Prefs.MAX_SLOTS; i++) {
             Prefs.Slot slot = prefs.slot(i);
@@ -135,11 +134,6 @@ public class ExperimentalLabActivity extends Activity {
         }
         body.addView(saveCard, margin(0, 0, 0, 12));
 
-        LinearLayout result = card();
-        result.addView(text("成功怎麼看？", 18, true, TEXT));
-        result.addView(text("成功：授權後顯示第二 Display 已建立，而且 LINE 沒有搶回主畫面。\n\n失敗：如果第二 Display 建立成功，但 LINE 啟動仍被 Android 拒絕，把完整錯誤截圖給我。那就代表下一個限制是在「把外部 App 放到第二 Display」，不是建立 Display 本身。", 12, false, MUTED));
-        body.addView(result, margin(0, 0, 0, 16));
-
         Button accessibility = quietButton("開啟無障礙設定");
         accessibility.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
         body.addView(accessibility);
@@ -156,8 +150,9 @@ public class ExperimentalLabActivity extends Activity {
             showFailure("這台手機沒有 MediaProjectionManager");
             return;
         }
-        displayState.setText("① 請在 Android 系統視窗允許螢幕分享；如果能選，請選整個螢幕");
+        displayState.setText("① 等待 Android 授權");
         displayState.setTextColor(AMBER);
+        nextStep.setText("在系統視窗選「整個螢幕」並按允許。完成後 Radar 會自動建立第二 Display。 ");
         try {
             startActivityForResult(projectionManager.createScreenCaptureIntent(), RC_PROJECTION);
         } catch (Throwable t) {
@@ -170,12 +165,13 @@ public class ExperimentalLabActivity extends Activity {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode != RC_PROJECTION) return;
         if (resultCode != RESULT_OK || data == null) {
-            showFailure("你沒有允許螢幕分享，所以無法建立 Public Virtual Display");
+            showFailure("你沒有允許螢幕分享，所以第二 Display 沒有建立");
             return;
         }
 
         displayState.setText("② 授權成功，正在建立第二 Display…");
         displayState.setTextColor(AMBER);
+        nextStep.setText("請稍候，接下來會自動把 LINE 啟動要求送到第二畫面。 ");
         try {
             ProjectionForegroundService.start(this, resultCode, data);
             waitForDisplay(0);
@@ -188,11 +184,17 @@ public class ExperimentalLabActivity extends Activity {
         handler.postDelayed(() -> {
             int id = VirtualDisplayEngine.displayId();
             if (id >= 0) {
-                displayState.setText("③ Display " + id + " 已建立，正在把 LINE 放進去…");
+                displayState.setText("③ 第二螢幕已建立 · Display " + id);
+                displayState.setTextColor(GREEN);
+                nextStep.setText("正在把 LINE 啟動要求送到 Display " + id + "…");
+
                 VirtualDisplayEngine.Result launch = VirtualDisplayEngine.launchLine(this);
                 if (launch.success) {
-                    displayState.setText("✓ 已要求 LINE 進入 Display " + launch.displayId + "\n現在觀察主畫面有沒有被 LINE 搶走。");
+                    prefs.setVirtualDisplayRunning(id, "第二畫面運作中 · Display " + id);
+                    displayState.setText("✓ 第二螢幕已開啟 · Display " + id);
                     displayState.setTextColor(GREEN);
+                    nextStep.setText("LINE 啟動要求已送出。現在可以直接按 Home 回主畫面，滑其他 App；不需要懸浮視窗。請先不要鎖屏。 ");
+                    showSuccess(id);
                 } else {
                     showFailure(launch.message);
                 }
@@ -207,18 +209,51 @@ public class ExperimentalLabActivity extends Activity {
         }, 250L);
     }
 
+    private void showSuccess(int displayId) {
+        new AlertDialog.Builder(this)
+            .setTitle("第二螢幕已開啟 ✓")
+            .setMessage(
+                "Display " + displayId + " 已建立，LINE 啟動要求已送出。\n\n" +
+                "接下來：\n" +
+                "1. 直接按 Home 回主畫面\n" +
+                "2. 正常使用 IG、Chrome、YouTube、遊戲都可以\n" +
+                "3. Radar 不需要懸浮視窗\n" +
+                "4. 通知欄只會保留一張必要的背景監控狀態\n\n" +
+                "注意：目前 MediaProjection 模式一鎖屏就會被 Android 終止。"
+            )
+            .setPositiveButton("知道了", null)
+            .show();
+    }
+
     private void refreshDisplayState() {
         if (displayState == null) return;
         int id = VirtualDisplayEngine.displayId();
         if (id >= 0) {
-            displayState.setText("✓ 第二畫面運作中 · Display " + id);
+            prefs.setVirtualDisplayRunning(id, "第二畫面運作中 · Display " + id);
+            displayState.setText("✓ 第二螢幕運作中 · Display " + id);
             displayState.setTextColor(GREEN);
+            nextStep.setText("可以回主畫面正常使用其他 App。Radar 會持續監控第二 Display；目前請不要鎖屏。 ");
+            return;
         }
+
+        if (prefs.virtualDisplayRunning()) {
+            displayState.setText("⚠ 第二螢幕狀態需要重新確認");
+            displayState.setTextColor(AMBER);
+            nextStep.setText(prefs.virtualDisplayStatus());
+            return;
+        }
+
+        String status = prefs.virtualDisplayStatus();
+        displayState.setText("第二螢幕未運作");
+        displayState.setTextColor(status.contains("鎖") || status.contains("停止") ? RED : AMBER);
+        nextStep.setText(status);
     }
 
     private void showFailure(String message) {
-        displayState.setText("✕ Display 測試失敗\n" + message);
+        prefs.setVirtualDisplayStopped(message);
+        displayState.setText("✕ 第二螢幕沒有成功啟動");
         displayState.setTextColor(RED);
+        nextStep.setText(message + "\n請截這段錯誤給我。 ");
     }
 
     private LinearLayout card() {
