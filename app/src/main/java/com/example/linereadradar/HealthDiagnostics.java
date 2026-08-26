@@ -1,7 +1,10 @@
 package com.example.linereadradar;
 
+import android.accessibilityservice.AccessibilityService;
 import android.content.Context;
 import android.content.SharedPreferences;
+
+import java.lang.ref.WeakReference;
 
 final class HealthDiagnostics {
     private static final String FILE = "radar_health_v067";
@@ -25,10 +28,22 @@ final class HealthDiagnostics {
     private static final String K_SHIELD_ACTIVE_SINCE = "shield_active_since";
     private static final String K_SHIELD_EVENT = "shield_event";
 
+    private static volatile WeakReference<AccessibilityService> accessibilityServiceRef =
+        new WeakReference<>(null);
+
     private final SharedPreferences p;
 
     HealthDiagnostics(Context context) {
         p = context.getSharedPreferences(FILE, Context.MODE_PRIVATE);
+        if (context instanceof AccessibilityService) {
+            accessibilityServiceRef = new WeakReference<>((AccessibilityService) context);
+        }
+    }
+
+    static AccessibilityService activeAccessibilityService() {
+        AccessibilityService service = accessibilityServiceRef.get();
+        if (service == null) return null;
+        return service;
     }
 
     private String k(int slot, String suffix) {
