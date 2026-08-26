@@ -20,10 +20,10 @@ public class ProjectionForegroundService extends Service {
     private static final String DISCONNECT_CHANNEL_ID = "line_radar_disconnect_v070";
     private static final int NOTIFICATION_ID = 7355;
     private static final int DISCONNECT_NOTIFICATION_ID = 7356;
-    private static final long HEALTH_CHECK_MS = 2500L;
-    private static final long LINE_RETRY_MS = 4500L;
-    private static final long LINE_PULSE_MS = 2500L;
-    private static final long POLL_OPEN_DELAY_MS = 650L;
+    private static final long HEALTH_CHECK_MS = 3000L;
+    private static final long LINE_RETRY_MS = 6000L;
+    private static final long LINE_PULSE_MS = 5000L;
+    private static final long POLL_OPEN_DELAY_MS = 350L;
 
     private Prefs prefs;
     private HealthDiagnostics health;
@@ -138,13 +138,16 @@ public class ProjectionForegroundService extends Service {
             }
 
             int id = remote.displayId;
+            boolean lineVerified = isLineVerified(id);
 
             if (shouldRunRecovery(id)) {
-                pulseLineTask(id);
-                maybeHardRefreshMonitoredChat(id);
+                if (isHardRefreshDue()) {
+                    maybeHardRefreshMonitoredChat(id, lineVerified);
+                } else {
+                    pulseLineTask(id);
+                }
             }
 
-            boolean lineVerified = isLineVerified(id);
             boolean targetReady = hasRecentTargetChat(id);
 
             if (lineVerified && targetReady) {
@@ -163,7 +166,8 @@ public class ProjectionForegroundService extends Service {
                     "Display " + id + " · LINE root 超過 15 秒未回報 · 自我修復中");
                 prefs.setGlobalStatus("第二畫面自我修復中 · Display " + id);
                 long now = System.currentTimeMillis();
-                if (!lineLaunchInProgress && now - lastLineLaunchAttemptAt >= LINE_RETRY_MS) {
+                if (!lineLaunchInProgress && !secondaryPollInProgress
+                    && now - lastLineLaunchAttemptAt >= LINE_RETRY_MS) {
                     retryLineLaunch();
                 }
             }
@@ -222,6 +226,10 @@ public class ProjectionForegroundService extends Service {
         return health.hasRecentBackgroundTarget(prefs, id, System.currentTimeMillis());
     }
 
+    private boolean isHardRefreshDue() {
+        return System.currentTimeMillis() - prefs.lastPollAt() >= prefs.pollIntervalMs();
+    }
+
     private void pulseLineTask(int id) {
         long now = System.currentTimeMillis();
         if (id <= 0 || linePulseInProgress || secondaryPollInProgress || lineLaunchInProgress
@@ -245,28 +253,36 @@ public class ProjectionForegroundService extends Service {
             prefs.updateVirtualDisplayStatus(
                 "Display " + id + " · LINE task heartbeat 失敗 · " + pulse.message);
             long retryNow = System.currentTimeMillis();
-            if (!lineLaunchInProgress && retryNow - lastLineLaunchAttemptAt >= LINE_RETRY_MS) {
+            if (!lineLaunchInProgress && !secondaryPollInProgress
+                && retryNow - lastLineLaunchAttemptAt >= LINE_RETRY_MS) {
                 retryLineLaunch();
             }
         });
     }
 
-    private void maybeHardRefreshMonitoredChat(int id) {
-        if (id <= 0 || secondaryPollInProgress || lineLaunchInProgress) return;
+    private void maybeHardRefreshMonitoredChat(int id, boolean lineVerified) {
+        if (id <= 0 || secondaryPollInProgress || lineLaunchInProgress || linePulseInProgress) return;
         if (!shouldRunRecovery(id)) return;
-
-        long now = System.currentTimeMillis();
-        if (now - prefs.lastPollAt() < prefs.pollIntervalMs()) return;
+        if (!isHardRefreshDue()) return;
 
         int slot = prefs.nextBackgroundSlot();
         if (slot < 0) return;
 
         Prefs.Slot target = prefs.slot(slot);
+        long now = System.currentTimeMillis();
         prefs.setLastPollAt(now);
         prefs.markChecked(slot, now, "第二畫面重新對準中");
         secondaryPollInProgress = true;
 
+        if (lineVerified) {
+            dispatchPoll(id, slot, target, POLL_OPEN_DELAY_MS);
+            return;
+        }
+
+        lastLineLaunchAttemptAt = now;
+        lineLaunchInProgress = true;
         VirtualDisplayEngine.launchLine(this, launch -> {
+            lineLaunchInProgress = false;
             if (!launch.success) {
                 secondaryPollInProgress = false;
                 prefs.markChecked(slot, System.currentTimeMillis(), "第二畫面重新對準失敗");
@@ -274,18 +290,21 @@ public class ProjectionForegroundService extends Service {
                     "Display " + id + " · 無法重新喚醒 LINE · " + launch.message);
                 return;
             }
-
-            handler.postDelayed(() -> {
-                long refreshAt = System.currentTimeMillis();
-                Intent command = new Intent(MonitorForegroundService.ACTION_POLL);
-                command.setPackage(getPackageName());
-                command.putExtra(MonitorForegroundService.EXTRA_SLOT, slot);
-                sendBroadcast(command);
-                health.markHardRefresh(id, refreshAt);
-                prefs.setGlobalStatus("第二畫面正在尋找「" + target.name + "」");
-                secondaryPollInProgress = false;
-            }, POLL_OPEN_DELAY_MS);
+            dispatchPoll(id, slot, target, POLL_OPEN_DELAY_MS);
         });
+    }
+
+    private void dispatchPoll(int id, int slot, Prefs.Slot target, long delayMs) {
+        handler.postDelayed(() -> {
+            long refreshAt = System.currentTimeMillis();
+            Intent command = new Intent(MonitorForegroundService.ACTION_POLL);
+            command.setPackage(getPackageName());
+            command.putExtra(MonitorForegroundService.EXTRA_SLOT, slot);
+            sendBroadcast(command);
+            health.markHardRefresh(id, refreshAt);
+            prefs.setGlobalStatus("第二畫面正在尋找「" + target.name + "」");
+            secondaryPollInProgress = false;
+        }, delayMs);
     }
 
     private void createDisplayAndLaunchLine() {
@@ -330,7 +349,8 @@ public class ProjectionForegroundService extends Service {
 
     private void retryLineLaunch() {
         int id = VirtualDisplayEngine.displayId();
-        if (id < 0 || lineLaunchInProgress || prefs.backgroundActiveCount() <= 0) return;
+        if (id < 0 || lineLaunchInProgress || secondaryPollInProgress
+            || prefs.backgroundActiveCount() <= 0) return;
 
         lastLineLaunchAttemptAt = System.currentTimeMillis();
         lineLaunchInProgress = true;
