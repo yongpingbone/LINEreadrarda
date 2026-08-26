@@ -24,6 +24,9 @@ final class ShizukuBridge {
     private static final int OP_QUERY_DISPLAY = 3;
     private static final int OP_RELEASE_DISPLAY = 4;
     private static final int OP_PULSE_LINE = 5;
+    private static final int OP_INPUT_TAP = 6;
+    private static final int OP_INPUT_SWIPE = 7;
+    private static final int OP_INPUT_BACK = 8;
 
     interface ResultCallback {
         void onResult(Result result);
@@ -147,15 +150,37 @@ final class ShizukuBridge {
     }
 
     static void pulseLineOnDisplay(int displayId, ResultCallback callback) {
+        if (!validateInputReady(displayId, callback)) return;
+        submit(PendingRequest.pulseLine(displayId, callback));
+    }
+
+    static void tapOnDisplay(int displayId, int x, int y, ResultCallback callback) {
+        if (!validateInputReady(displayId, callback)) return;
+        submit(PendingRequest.tap(displayId, x, y, callback));
+    }
+
+    static void swipeOnDisplay(int displayId, int startX, int startY,
+                               int endX, int endY, int durationMs,
+                               ResultCallback callback) {
+        if (!validateInputReady(displayId, callback)) return;
+        submit(PendingRequest.swipe(displayId, startX, startY, endX, endY, durationMs, callback));
+    }
+
+    static void backOnDisplay(int displayId, ResultCallback callback) {
+        if (!validateInputReady(displayId, callback)) return;
+        submit(PendingRequest.back(displayId, callback));
+    }
+
+    private static boolean validateInputReady(int displayId, ResultCallback callback) {
         if (!permissionGranted()) {
             post(callback, Result.fail("Shizuku 尚未取得授權"));
-            return;
+            return false;
         }
         if (displayId <= 0) {
             post(callback, Result.fail("無效的第二 Display"));
-            return;
+            return false;
         }
-        submit(PendingRequest.pulseLine(displayId, callback));
+        return true;
     }
 
     static void launchLineOnDisplay(Context context, int displayId, ResultCallback callback) {
@@ -249,8 +274,24 @@ final class ShizukuBridge {
                         break;
                     }
                     case OP_PULSE_LINE: {
-                        String raw = service.pulseAppTaskOnDisplay(LINE_PACKAGE, request.displayId);
-                        result = parseLaunch(raw);
+                        result = parseLaunch(service.pulseAppTaskOnDisplay(LINE_PACKAGE, request.displayId));
+                        break;
+                    }
+                    case OP_INPUT_TAP: {
+                        result = parseLaunch(service.inputTapOnDisplay(
+                            request.displayId, request.x1, request.y1));
+                        break;
+                    }
+                    case OP_INPUT_SWIPE: {
+                        result = parseLaunch(service.inputSwipeOnDisplay(
+                            request.displayId,
+                            request.x1, request.y1,
+                            request.x2, request.y2,
+                            request.durationMs));
+                        break;
+                    }
+                    case OP_INPUT_BACK: {
+                        result = parseLaunch(service.inputBackOnDisplay(request.displayId));
                         break;
                     }
                     case OP_LAUNCH:
@@ -312,10 +353,16 @@ final class ShizukuBridge {
         final int width;
         final int height;
         final int densityDpi;
+        final int x1;
+        final int y1;
+        final int x2;
+        final int y2;
+        final int durationMs;
         final ResultCallback callback;
 
         private PendingRequest(int operation, String packageName, String componentName,
                                int displayId, int width, int height, int densityDpi,
+                               int x1, int y1, int x2, int y2, int durationMs,
                                ResultCallback callback) {
             this.operation = operation;
             this.packageName = packageName;
@@ -324,31 +371,56 @@ final class ShizukuBridge {
             this.width = width;
             this.height = height;
             this.densityDpi = densityDpi;
+            this.x1 = x1;
+            this.y1 = y1;
+            this.x2 = x2;
+            this.y2 = y2;
+            this.durationMs = durationMs;
             this.callback = callback;
         }
 
         static PendingRequest launch(String pkg, String component, int displayId,
                                      ResultCallback callback) {
-            return new PendingRequest(OP_LAUNCH, pkg, component, displayId, 0, 0, 0, callback);
+            return new PendingRequest(OP_LAUNCH, pkg, component, displayId,
+                0, 0, 0, 0, 0, 0, 0, 0, callback);
         }
 
         static PendingRequest ensureDisplay(int width, int height, int densityDpi,
                                             ResultCallback callback) {
             return new PendingRequest(OP_ENSURE_DISPLAY, null, null, -1,
-                width, height, densityDpi, callback);
+                width, height, densityDpi, 0, 0, 0, 0, 0, callback);
         }
 
         static PendingRequest queryDisplay(ResultCallback callback) {
-            return new PendingRequest(OP_QUERY_DISPLAY, null, null, -1, 0, 0, 0, callback);
+            return new PendingRequest(OP_QUERY_DISPLAY, null, null, -1,
+                0, 0, 0, 0, 0, 0, 0, 0, callback);
         }
 
         static PendingRequest releaseDisplay(ResultCallback callback) {
-            return new PendingRequest(OP_RELEASE_DISPLAY, null, null, -1, 0, 0, 0, callback);
+            return new PendingRequest(OP_RELEASE_DISPLAY, null, null, -1,
+                0, 0, 0, 0, 0, 0, 0, 0, callback);
         }
 
         static PendingRequest pulseLine(int displayId, ResultCallback callback) {
             return new PendingRequest(OP_PULSE_LINE, LINE_PACKAGE, null, displayId,
-                0, 0, 0, callback);
+                0, 0, 0, 0, 0, 0, 0, 0, callback);
+        }
+
+        static PendingRequest tap(int displayId, int x, int y, ResultCallback callback) {
+            return new PendingRequest(OP_INPUT_TAP, null, null, displayId,
+                0, 0, 0, x, y, 0, 0, 0, callback);
+        }
+
+        static PendingRequest swipe(int displayId, int x1, int y1,
+                                    int x2, int y2, int durationMs,
+                                    ResultCallback callback) {
+            return new PendingRequest(OP_INPUT_SWIPE, null, null, displayId,
+                0, 0, 0, x1, y1, x2, y2, durationMs, callback);
+        }
+
+        static PendingRequest back(int displayId, ResultCallback callback) {
+            return new PendingRequest(OP_INPUT_BACK, null, null, displayId,
+                0, 0, 0, 0, 0, 0, 0, 0, callback);
         }
     }
 
