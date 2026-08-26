@@ -8,4 +8,7 @@ interface IRadarShellService {
     String getVirtualDisplayStatus() = 4;
     void releaseVirtualDisplay() = 5;
     String pulseAppTaskOnDisplay(String packageName, int displayId) = 6;
+    String inputTapOnDisplay(int displayId, int x, int y) = 7;
+    String inputSwipeOnDisplay(int displayId, int startX, int startY, int endX, int endY, int durationMs) = 8;
+    String inputBackOnDisplay(int displayId) = 9;
 }
