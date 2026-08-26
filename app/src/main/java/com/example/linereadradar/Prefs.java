@@ -8,6 +8,7 @@ import java.util.List;
 
 final class Prefs {
     static final int MAX_SLOTS = 5;
+    static final int READ_DETECTOR_SCHEMA = 2;
 
     private static final String FILE = "radar_prefs";
     private static final String K_MIGRATED = "v04_migrated";
@@ -158,6 +159,7 @@ final class Prefs {
                     .putBoolean(k(i, "vibrate"), false)
                     .putBoolean(k(i, "save_content"), false)
                     .putBoolean(k(i, "armed"), false)
+                    .putInt(k(i, "read_schema"), READ_DETECTOR_SCHEMA)
                     .putString(k(i, "incoming_sig"), "")
                     .putString(k(i, "status"), "尚未建立基準")
                     .apply();
@@ -175,6 +177,7 @@ final class Prefs {
             .putString(k(index, "name"), value)
             .putBoolean(k(index, "armed"), false)
             .putBoolean(k(index, "background"), false)
+            .putInt(k(index, "read_schema"), READ_DETECTOR_SCHEMA)
             .putString(k(index, "incoming_sig"), "")
             .putString(k(index, "status"), "名稱已更新，請重新建立基準")
             .apply();
@@ -185,7 +188,7 @@ final class Prefs {
         SharedPreferences.Editor e = p.edit();
         String[] suffixes = new String[]{
             "name", "enabled", "background", "read", "messages", "notify", "vibrate", "save_content",
-            "armed", "base_count", "base_max_y", "armed_at", "incoming_sig",
+            "armed", "base_count", "base_max_y", "armed_at", "read_schema", "incoming_sig",
             "last_checked", "last_unread", "status"
         };
         for (String suffix : suffixes) e.remove(k(index, suffix));
@@ -210,6 +213,7 @@ final class Prefs {
             .putBoolean(k(index, "armed"), true)
             .putInt(k(index, "base_count"), count)
             .putInt(k(index, "base_max_y"), maxY)
+            .putInt(k(index, "read_schema"), READ_DETECTOR_SCHEMA)
             .putLong(k(index, "armed_at"), now)
             .putLong(k(index, "last_unread"), now)
             .putString(k(index, "incoming_sig"), incomingSignature == null ? "" : incomingSignature)
@@ -218,11 +222,31 @@ final class Prefs {
             .apply();
     }
 
+    boolean needsReadDetectorRebaseline(int index) {
+        if (index < 0 || index >= MAX_SLOTS) return false;
+        return p.getInt(k(index, "read_schema"), 1) < READ_DETECTOR_SCHEMA;
+    }
+
+    void rebaselineReadDetector(int index, int count, int maxY, long now) {
+        if (index < 0 || index >= MAX_SLOTS) return;
+        p.edit()
+            .putBoolean(k(index, "armed"), true)
+            .putInt(k(index, "base_count"), count)
+            .putInt(k(index, "base_max_y"), maxY)
+            .putInt(k(index, "read_schema"), READ_DETECTOR_SCHEMA)
+            .putLong(k(index, "armed_at"), now)
+            .putLong(k(index, "last_unread"), now)
+            .putLong(k(index, "last_checked"), now)
+            .putString(k(index, "status"), "已讀偵測器已重新校準 · 監控中")
+            .apply();
+    }
+
     void updateReadBaseline(int index, int count, int maxY, long now) {
         p.edit()
             .putBoolean(k(index, "armed"), true)
             .putInt(k(index, "base_count"), count)
             .putInt(k(index, "base_max_y"), maxY)
+            .putInt(k(index, "read_schema"), READ_DETECTOR_SCHEMA)
             .putLong(k(index, "armed_at"), now)
             .putLong(k(index, "last_unread"), now)
             .putLong(k(index, "last_checked"), now)
@@ -349,6 +373,7 @@ final class Prefs {
                 .putBoolean(k(0, "vibrate"), false)
                 .putBoolean(k(0, "save_content"), false)
                 .putBoolean(k(0, "armed"), false)
+                .putInt(k(0, "read_schema"), READ_DETECTOR_SCHEMA)
                 .putString(k(0, "status"), "尚未建立基準");
             if (legacyEnabled) e.putBoolean(K_GLOBAL_ENABLED, true);
         }
