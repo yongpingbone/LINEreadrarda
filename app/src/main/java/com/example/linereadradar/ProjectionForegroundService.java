@@ -75,6 +75,7 @@ public class ProjectionForegroundService extends Service {
     }
 
     public static void stop(Context context) {
+        NoReadOverlayShield.close();
         NoReadShieldActivity.closeShield();
         VirtualDisplayEngine.attach(context);
         VirtualDisplayEngine.release();
@@ -146,20 +147,22 @@ public class ProjectionForegroundService extends Service {
             boolean targetReady = hasRecentTargetChat(id);
             boolean targetEverSeen = hasEverSeenTargetChat(id);
 
-            // Once a monitored chat has actually been located, fail closed: keep a transparent
-            // Radar Activity focused above LINE and stop bringing LINE to the foreground. If the
-            // chat later goes stale, notify instead of reopening LINE and risking an automatic read.
+            // v0.6.16 proved that a translucent Activity shield gets focus but removes LINE from
+            // Accessibility.getWindowsOnAllDisplays() on Samsung/One UI. v0.6.17 therefore uses a
+            // transparent TYPE_ACCESSIBILITY_OVERLAY. It must earn the same gate: focus + LINE root
+            // still visible + target chat still updating. Until that is observed on-device, this is
+            // an experiment, not a claimed no-read solution.
             if (lineVerified && targetReady) {
                 ensureNoReadShield(id);
-                if (NoReadShieldActivity.isActiveOnDisplay(id)) {
+                if (NoReadOverlayShield.isProtectingOnDisplay(id)) {
                     markMonitorHealthy();
                     prefs.updateVirtualDisplayStatus(
-                        "Display " + id + " · 目標聊天室已定位 · No-Read Shield 保護中");
-                    prefs.setGlobalStatus("背景＋息屏監控中 · No-Read 保護 · Display " + id);
+                        "Display " + id + " · 目標聊天室已定位 · Accessibility Overlay 保護中");
+                    prefs.setGlobalStatus("背景＋息屏監控中 · Overlay No-Read 實驗 · Display " + id);
                 } else {
                     prefs.updateVirtualDisplayStatus(
-                        "Display " + id + " · 目標聊天室已定位 · 正在啟用 No-Read Shield");
-                    prefs.setGlobalStatus("正在啟用免 Root No-Read 保護");
+                        "Display " + id + " · 目標聊天室已定位 · 正在啟用 Accessibility Overlay");
+                    prefs.setGlobalStatus("正在啟用免 Root Overlay No-Read 實驗");
                 }
                 updateNotification();
                 return;
@@ -170,13 +173,11 @@ public class ProjectionForegroundService extends Service {
                 maybeAlertDisconnect("No-Read 保護：聊天室更新已中斷，Radar 已停止自動開啟 LINE");
                 prefs.updateVirtualDisplayStatus(
                     "Display " + id + " · No-Read fail-closed · 不自動喚醒聊天室");
-                prefs.setGlobalStatus("監控暫停 · No-Read 保護中 · 請重新啟用背景監控");
+                prefs.setGlobalStatus("監控暫停 · No-Read 保護中 · 請查看 Radar Lab");
                 updateNotification();
                 return;
             }
 
-            // Initial setup only. Before the target chat has ever been confirmed on this display,
-            // Radar may use heartbeat/hard refresh to find it.
             if (shouldRunRecovery(id)) {
                 if (isHardRefreshDue()) {
                     maybeHardRefreshMonitoredChat(id, lineVerified);
@@ -241,7 +242,7 @@ public class ProjectionForegroundService extends Service {
 
     private boolean shouldRunRecovery(int id) {
         return id > 0
-            && !NoReadShieldActivity.isActiveOnDisplay(id)
+            && !NoReadOverlayShield.isProtectingOnDisplay(id)
             && prefs.globalEnabled()
             && !prefs.paused()
             && prefs.backgroundActiveCount() > 0
@@ -270,28 +271,28 @@ public class ProjectionForegroundService extends Service {
     }
 
     private void ensureNoReadShield(int id) {
-        if (id <= 0 || NoReadShieldActivity.isActiveOnDisplay(id) || shieldLaunchInProgress) return;
+        if (id <= 0 || NoReadOverlayShield.isProtectingOnDisplay(id) || shieldLaunchInProgress) return;
         long now = System.currentTimeMillis();
         if (now - lastShieldAttemptAt < SHIELD_RETRY_MS) return;
         lastShieldAttemptAt = now;
         shieldLaunchInProgress = true;
-        ShizukuBridge.launchNoReadShieldOnDisplay(id, result -> {
-            shieldLaunchInProgress = false;
-            if (result.success) {
-                prefs.updateVirtualDisplayStatus(
-                    "Display " + id + " · No-Read Shield 啟動中");
-            } else {
-                prefs.updateVirtualDisplayStatus(
-                    "Display " + id + " · No-Read Shield 啟動失敗 · " + result.message);
-                prefs.setGlobalStatus("No-Read 保護啟動失敗 · 已停止自動喚醒 LINE");
-            }
-            updateNotification();
-        });
+
+        boolean started = NoReadOverlayShield.show(this, id);
+        shieldLaunchInProgress = false;
+        if (started) {
+            prefs.updateVirtualDisplayStatus(
+                "Display " + id + " · Accessibility Overlay Shield 啟動中");
+        } else {
+            prefs.updateVirtualDisplayStatus(
+                "Display " + id + " · Accessibility Overlay Shield 啟動失敗 · 請看 Radar Lab heartbeat detail");
+            prefs.setGlobalStatus("Overlay No-Read 實驗啟動失敗 · 已停止自動喚醒 LINE");
+        }
+        updateNotification();
     }
 
     private void pulseLineTask(int id) {
         long now = System.currentTimeMillis();
-        if (id <= 0 || NoReadShieldActivity.isActiveOnDisplay(id)
+        if (id <= 0 || NoReadOverlayShield.isProtectingOnDisplay(id)
             || linePulseInProgress || secondaryPollInProgress || lineLaunchInProgress
             || now - lastLinePulseAt < LINE_PULSE_MS) return;
 
@@ -317,7 +318,7 @@ public class ProjectionForegroundService extends Service {
     }
 
     private void maybeHardRefreshMonitoredChat(int id, boolean lineVerified) {
-        if (id <= 0 || NoReadShieldActivity.isActiveOnDisplay(id)
+        if (id <= 0 || NoReadOverlayShield.isProtectingOnDisplay(id)
             || secondaryPollInProgress || lineLaunchInProgress || linePulseInProgress) return;
         if (!shouldRunRecovery(id)) return;
         if (!isHardRefreshDue()) return;
@@ -366,6 +367,7 @@ public class ProjectionForegroundService extends Service {
 
     private void createDisplayAndLaunchLine() {
         if (displaySetupInProgress) return;
+        NoReadOverlayShield.close();
         NoReadShieldActivity.closeShield();
         displaySetupInProgress = true;
         prefs.setGlobalStatus("正在建立 Shizuku 常駐第二畫面");
@@ -409,7 +411,7 @@ public class ProjectionForegroundService extends Service {
 
     private void retryLineLaunch() {
         int id = VirtualDisplayEngine.displayId();
-        if (id < 0 || NoReadShieldActivity.isActiveOnDisplay(id)
+        if (id < 0 || NoReadOverlayShield.isProtectingOnDisplay(id)
             || lineLaunchInProgress || secondaryPollInProgress
             || prefs.backgroundActiveCount() <= 0) return;
 
@@ -505,19 +507,19 @@ public class ProjectionForegroundService extends Service {
         int id = VirtualDisplayEngine.displayId();
         boolean lineVerified = isLineVerified(id);
         boolean targetReady = hasRecentTargetChat(id);
-        boolean shieldActive = NoReadShieldActivity.isActiveOnDisplay(id);
+        boolean shieldActive = NoReadOverlayShield.isProtectingOnDisplay(id);
 
         if (!ShizukuBridge.binderReady()) text = "Shizuku 未啟動 · 監控暫停";
         else if (!ShizukuBridge.permissionGranted()) text = "等待 Shizuku 授權";
         else if (displaySetupInProgress) text = "正在建立 Always-unlocked 第二畫面";
         else if (displayQueryInProgress && id < 0) text = "正在接回 Shizuku 第二畫面";
-        else if (shieldLaunchInProgress) text = "Display " + id + " · 正在啟用 No-Read Shield";
+        else if (shieldLaunchInProgress) text = "Display " + id + " · 正在啟用 Accessibility Overlay";
         else if (secondaryPollInProgress) text = "Display " + id + " · 初次定位聊天室";
         else if (lineLaunchInProgress) text = "Display " + id + " · 初次啟動 LINE";
         else if (linePulseInProgress) text = "Display " + id + " · 初次定位 heartbeat";
         else if (id < 0) text = "正在建立第二畫面";
-        else if (lineVerified && targetReady && shieldActive) text = "Display " + id + " · No-Read Shield · 背景＋息屏監控";
-        else if (lineVerified && targetReady) text = "Display " + id + " · 目標已定位 · 正在啟用 No-Read";
+        else if (lineVerified && targetReady && shieldActive) text = "Display " + id + " · Overlay No-Read 實驗 · 背景＋息屏監控";
+        else if (lineVerified && targetReady) text = "Display " + id + " · 目標已定位 · 正在啟用 Overlay No-Read";
         else if (hasEverSeenTargetChat(id)) text = "Display " + id + " · No-Read fail-closed · 監控暫停";
         else if (lineVerified) text = "Display " + id + " · LINE 已驗證 · 初次定位監控聊天室";
         else if (shouldRunRecovery(id)) text = "Display " + id + " · 初次定位修復中";
