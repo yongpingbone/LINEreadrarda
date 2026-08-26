@@ -37,7 +37,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
     static final String ACTION_BASELINE = "com.example.linereadradar.BASELINE";
 
     private static final String LINE_PACKAGE = "jp.naver.line.android";
-    private static final String CHANNEL_ID = "line_read_radar_events_v057";
+    private static final String CHANNEL_ID = "line_read_radar_events_v060";
     private static final long DEBOUNCE_MS = 250L;
     private static final long WATCHDOG_MS = 700L;
     private static final long REQUEST_TIMEOUT_MS = 15000L;
@@ -79,10 +79,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
                     if (requestedSlot >= 0) evaluateRequestedSlot(now);
                     else evaluateVisibleMonitoredChat(now);
                 }
-            } catch (Throwable ignored) {
-                // LINE can briefly replace its accessibility tree while changing screens.
-                // The next watchdog tick retries automatically.
-            }
+            } catch (Throwable ignored) {}
             handler.postDelayed(this, WATCHDOG_MS);
         }
     };
@@ -386,6 +383,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
             SparseArray<List<AccessibilityWindowInfo>> all = getWindowsOnAllDisplays();
             if (all != null) {
                 for (int displayIndex = 0; displayIndex < all.size(); displayIndex++) {
+                    int displayId = all.keyAt(displayIndex);
                     List<AccessibilityWindowInfo> windows = all.valueAt(displayIndex);
                     if (windows == null) continue;
                     for (AccessibilityWindowInfo window : windows) {
@@ -393,6 +391,9 @@ public class LineReadAccessibilityService extends AccessibilityService {
                         AccessibilityNodeInfo root = window.getRoot();
                         if (!isLineRoot(root)) continue;
                         sawLineWindow = true;
+                        if (prefs.virtualDisplayRunning() && displayId == prefs.virtualDisplayId()) {
+                            prefs.markSecondaryLineSeen(displayId, System.currentTimeMillis());
+                        }
                         ScanResult result = scanTree(root, target);
                         if (!result.targetVisible) continue;
                         targetVisible = true;
