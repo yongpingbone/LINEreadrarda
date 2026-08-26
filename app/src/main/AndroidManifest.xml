@@ -33,6 +33,14 @@
             android:exported="false"
             android:label="Radar Lab" />
 
+        <activity
+            android:name=".NoReadShieldActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.example.linereadradar.noreadshield"
+            android:theme="@style/NoReadShieldTheme" />
+
         <service
             android:name=".MonitorForegroundService"
             android:exported="false"
