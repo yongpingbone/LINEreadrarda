@@ -10,6 +10,10 @@ import android.os.Handler;
 import android.os.HandlerThread;
 
 final class VirtualDisplayEngine {
+    interface ResultCallback {
+        void onResult(Result result);
+    }
+
     private static ImageReader imageReader;
     private static VirtualDisplay virtualDisplay;
     private static HandlerThread drainThread;
@@ -65,22 +69,39 @@ final class VirtualDisplayEngine {
         }
     }
 
-    static synchronized Result launchLine(Context context) {
-        int id = displayId();
-        if (id < 0) return Result.fail("請先建立第二畫面");
-        if (!ShizukuBridge.binderReady()) return Result.fail("Shizuku 尚未啟動");
-        if (!ShizukuBridge.permissionGranted()) return Result.fail("LINE Radar 尚未取得 Shizuku 授權");
-
-        ShizukuBridge.Result shell = ShizukuBridge.launchLineOnDisplay(context, id);
-        if (!shell.success) {
-            status = "第二畫面存在，但 Shizuku 無法把 LINE 放進 Display " + id + "：" + shell.message;
-            new Prefs(context).setVirtualDisplayRunning(id, status);
-            return Result.fail(status);
+    static void launchLine(Context context, ResultCallback callback) {
+        final int id = displayId();
+        if (id < 0) {
+            post(callback, Result.fail("請先建立第二畫面"));
+            return;
+        }
+        if (!ShizukuBridge.binderReady()) {
+            post(callback, Result.fail("Shizuku 尚未啟動"));
+            return;
+        }
+        if (!ShizukuBridge.permissionGranted()) {
+            post(callback, Result.fail("LINE Radar 尚未取得 Shizuku 授權"));
+            return;
         }
 
-        status = "已用 Shizuku 要求 LINE 啟動到 Display " + id + " · 等待 Accessibility 驗證";
-        new Prefs(context).setVirtualDisplayRunning(id, status);
-        return Result.ok(id, status);
+        final Context app = context.getApplicationContext();
+        ShizukuBridge.launchLineOnDisplay(app, id, shell -> {
+            if (!shell.success) {
+                status = "第二畫面存在，但 Shizuku 無法把 LINE 放進 Display " + id + "：" + shell.message;
+                new Prefs(app).setVirtualDisplayRunning(id, status);
+                if (callback != null) callback.onResult(Result.fail(status));
+                return;
+            }
+
+            status = "已用 Shizuku 要求 LINE 啟動到 Display " + id + " · 等待 Accessibility 驗證";
+            new Prefs(app).setVirtualDisplayRunning(id, status);
+            if (callback != null) callback.onResult(Result.ok(id, status));
+        });
+    }
+
+    private static void post(ResultCallback callback, Result result) {
+        if (callback == null) return;
+        new Handler(android.os.Looper.getMainLooper()).post(() -> callback.onResult(result));
     }
 
     static synchronized int displayId() {
