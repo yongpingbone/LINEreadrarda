@@ -10,8 +10,8 @@ android {
         applicationId 'com.example.linereadradar'
         minSdk 26
         targetSdk 35
-        versionCode 26
-        versionName '0.6.11-shizuku'
+        versionCode 27
+        versionName '0.6.12-shizuku'
     }
 
     buildFeatures {
