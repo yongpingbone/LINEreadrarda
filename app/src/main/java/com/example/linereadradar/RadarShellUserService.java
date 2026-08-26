@@ -28,6 +28,10 @@ public class RadarShellUserService extends IRadarShellService.Stub {
     private static final long INPUT_PROCESS_TIMEOUT_MS = 2200L;
     private static final long AM_PROCESS_TIMEOUT_MS = 3000L;
 
+    // Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_MULTIPLE_TASK.
+    // Keep the Radar-owned LINE task separate from the user's normal primary-display LINE task.
+    private static final String ISOLATED_TASK_FLAGS = "0x18000000";
+
     private static final int FLAG_SUPPORTS_TOUCH = 1 << 6;
     private static final int FLAG_TRUSTED = 1 << 10;
     private static final int FLAG_OWN_DISPLAY_GROUP = 1 << 11;
@@ -156,26 +160,52 @@ public class RadarShellUserService extends IRadarShellService.Stub {
 
     @Override
     public String startActivityOnDisplay(String packageName, String componentName, int displayId) {
+        return startActivityOnDisplayInternal(packageName, componentName, displayId, false);
+    }
+
+    @Override
+    public String startIsolatedActivityOnDisplay(String packageName, String componentName, int displayId) {
+        if (!LINE_PACKAGE.equals(packageName)) return "ERR:2\nisolated launch is LINE-only";
+        return startActivityOnDisplayInternal(packageName, componentName, displayId, true);
+    }
+
+    private String startActivityOnDisplayInternal(String packageName, String componentName,
+                                                  int displayId, boolean isolatedTask) {
         boolean allowedLine = LINE_PACKAGE.equals(packageName)
             && componentName != null
             && componentName.startsWith(packageName + "/");
         boolean allowedShield = RADAR_PACKAGE.equals(packageName)
             && RADAR_SHIELD_COMPONENT.equals(componentName);
         if (!allowedLine && !allowedShield) return "ERR:2\npackage/component not allowed";
+        if (isolatedTask && !allowedLine) return "ERR:2\nisolated task only allowed for LINE";
 
         String displayError = validateDisplay(displayId);
         if (displayError != null) return displayError;
 
         Process process = null;
         try {
-            process = new ProcessBuilder(
-                "am", "start",
-                "--user", "0",
-                "--display", String.valueOf(displayId),
-                "--activity-exclude-from-recents",
-                "--activity-no-animation",
-                "-n", componentName
-            ).redirectErrorStream(true).start();
+            ProcessBuilder builder;
+            if (isolatedTask) {
+                builder = new ProcessBuilder(
+                    "am", "start",
+                    "--user", "0",
+                    "--display", String.valueOf(displayId),
+                    "--activity-exclude-from-recents",
+                    "--activity-no-animation",
+                    "-f", ISOLATED_TASK_FLAGS,
+                    "-n", componentName
+                );
+            } else {
+                builder = new ProcessBuilder(
+                    "am", "start",
+                    "--user", "0",
+                    "--display", String.valueOf(displayId),
+                    "--activity-exclude-from-recents",
+                    "--activity-no-animation",
+                    "-n", componentName
+                );
+            }
+            process = builder.redirectErrorStream(true).start();
 
             if (!process.waitFor(AM_PROCESS_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
                 terminateProcess(process);
@@ -184,12 +214,56 @@ public class RadarShellUserService extends IRadarShellService.Stub {
 
             StringBuilder out = readOutput(process);
             int code = process.exitValue();
-            if (code == 0) return "OK\n" + out;
+            if (code == 0) {
+                return "OK\n" + (isolatedTask ? "isolated-task launch\n" : "") + out;
+            }
             return "ERR:" + code + "\n" + out;
         } catch (Throwable t) {
             return "ERR:1\n" + t.getClass().getSimpleName() + ": " + safe(t.getMessage());
         } finally {
             terminateProcess(process);
+        }
+    }
+
+    @Override
+    public String getAppTaskTopology(String packageName, int preferredDisplayId) {
+        if (!LINE_PACKAGE.equals(packageName)) return "ERR:2\npackage not allowed";
+        try {
+            Context shellContext = shellContext();
+            ActivityManager am = (ActivityManager) shellContext.getSystemService(Context.ACTIVITY_SERVICE);
+            if (am == null) return "ERR:3\nActivityManager unavailable";
+            List<ActivityManager.RunningTaskInfo> tasks = am.getRunningTasks(100);
+            if (tasks == null) return "ERR:3\nno running task list";
+
+            int total = 0;
+            int onPreferred = 0;
+            int onPrimary = 0;
+            int unknownDisplay = 0;
+            StringBuilder detail = new StringBuilder();
+            for (ActivityManager.RunningTaskInfo task : tasks) {
+                if (task == null || task.id <= 0) continue;
+                ComponentName top = task.topActivity;
+                ComponentName base = task.baseActivity;
+                boolean matches = (top != null && packageName.equals(top.getPackageName()))
+                    || (base != null && packageName.equals(base.getPackageName()));
+                if (!matches) continue;
+                total++;
+                int displayId = resolveTaskDisplayId(task);
+                if (displayId == preferredDisplayId) onPreferred++;
+                else if (displayId == 0) onPrimary++;
+                else if (displayId < 0) unknownDisplay++;
+                if (detail.length() > 0) detail.append(" | ");
+                detail.append("task=").append(task.id)
+                    .append(" display=").append(displayId)
+                    .append(" top=").append(top == null ? "?" : top.getClassName());
+            }
+            return "OK\ntotal=" + total
+                + " preferred=" + onPreferred
+                + " primary=" + onPrimary
+                + " unknown=" + unknownDisplay
+                + (detail.length() == 0 ? "" : "\n" + detail);
+        } catch (Throwable t) {
+            return "ERR:1\n" + t.getClass().getSimpleName() + ": " + safe(t.getMessage());
         }
     }
 
