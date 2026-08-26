@@ -19,7 +19,7 @@ public class MonitorForegroundService extends Service {
     static final String ACTION_POLL = "com.example.linereadradar.POLL";
     static final String EXTRA_SLOT = "slot";
 
-    private static final String CHANNEL_ID = "line_read_radar_background_v042";
+    private static final String CHANNEL_ID = "line_read_radar_background_v054";
     private static final int NOTIFICATION_ID = 7310;
     private static final long HEARTBEAT_MS = 5000L;
     private static final long RETRY_LOCKED_MS = 15000L;
@@ -36,17 +36,24 @@ public class MonitorForegroundService extends Service {
                 return;
             }
 
-            if (prefs.backgroundActiveCount() == 0) {
-                prefs.setGlobalStatus("即時監控中");
-                stopForeground(true);
-                stopSelf();
-                return;
-            }
-
             if (prefs.paused()) {
                 prefs.setGlobalStatus("全部監控已暫停");
                 updateNotification();
                 handler.postDelayed(this, HEARTBEAT_MS);
+                return;
+            }
+
+            if (hasUnarmedActiveSlot()) {
+                prefs.setGlobalStatus("首次設定中 · 請到 LINE 選擇指定聊天室");
+                updateNotification();
+                handler.postDelayed(this, HEARTBEAT_MS);
+                return;
+            }
+
+            if (prefs.backgroundActiveCount() == 0) {
+                prefs.setGlobalStatus("即時監控中");
+                stopForeground(true);
+                stopSelf();
                 return;
             }
 
@@ -87,7 +94,7 @@ public class MonitorForegroundService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (!prefs.globalEnabled() || prefs.backgroundActiveCount() == 0) {
+        if (!prefs.globalEnabled() || prefs.activeCount() == 0) {
             stopSelf();
             return START_NOT_STICKY;
         }
@@ -112,6 +119,14 @@ public class MonitorForegroundService extends Service {
 
     @Override
     public IBinder onBind(Intent intent) { return null; }
+
+    private boolean hasUnarmedActiveSlot() {
+        for (int i = 0; i < Prefs.MAX_SLOTS; i++) {
+            Prefs.Slot s = prefs.slot(i);
+            if (s.active() && !s.armed) return true;
+        }
+        return false;
+    }
 
     private void attemptPoll(long now) {
         if (prefs.backgroundActiveCount() == 0) return;
@@ -159,10 +174,10 @@ public class MonitorForegroundService extends Service {
             NotificationManager nm = getSystemService(NotificationManager.class);
             NotificationChannel channel = new NotificationChannel(
                 CHANNEL_ID,
-                "背景檢查狀態",
+                "監控狀態",
                 NotificationManager.IMPORTANCE_LOW
             );
-            channel.setDescription("LINE Radar 已開啟背景檢查的人員狀態");
+            channel.setDescription("LINE Radar 首次設定與背景檢查狀態");
             nm.createNotificationChannel(channel);
         }
     }
@@ -174,9 +189,10 @@ public class MonitorForegroundService extends Service {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) pendingFlags |= PendingIntent.FLAG_IMMUTABLE;
         PendingIntent pendingIntent = PendingIntent.getActivity(this, 20, openApp, pendingFlags);
 
-        String detail = prefs.paused()
-            ? "全部監控已暫停"
-            : prefs.globalStatus() + " · " + prefs.backgroundActiveCount() + " 位背景 ON";
+        String detail;
+        if (prefs.paused()) detail = "全部監控已暫停";
+        else if (hasUnarmedActiveSlot()) detail = "首次設定中 · 到 LINE 選擇指定聊天室即可";
+        else detail = prefs.globalStatus() + " · " + prefs.backgroundActiveCount() + " 位背景 ON";
 
         Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
             ? new Notification.Builder(this, CHANNEL_ID)
