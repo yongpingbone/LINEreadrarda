@@ -23,6 +23,7 @@ public class ProjectionForegroundService extends Service {
     private static final long HEALTH_CHECK_MS = 3000L;
     private static final long LINE_RETRY_MS = 6000L;
     private static final long LINE_PULSE_MS = 5000L;
+    private static final long SHIELD_RETRY_MS = 3000L;
     private static final long POLL_OPEN_DELAY_MS = 350L;
 
     private Prefs prefs;
@@ -32,11 +33,13 @@ public class ProjectionForegroundService extends Service {
     private boolean displayQueryInProgress = false;
     private boolean lineLaunchInProgress = false;
     private boolean linePulseInProgress = false;
+    private boolean shieldLaunchInProgress = false;
     private boolean secondaryPollInProgress = false;
     private boolean sessionWasReady = false;
     private boolean disconnectAlerted = false;
     private long lastLineLaunchAttemptAt = 0L;
     private long lastLinePulseAt = 0L;
+    private long lastShieldAttemptAt = 0L;
     private final Handler handler = new Handler(Looper.getMainLooper());
 
     private final Runnable healthCheck = new Runnable() {
@@ -72,6 +75,7 @@ public class ProjectionForegroundService extends Service {
     }
 
     public static void stop(Context context) {
+        NoReadShieldActivity.closeShield();
         VirtualDisplayEngine.attach(context);
         VirtualDisplayEngine.release();
         try { context.stopService(new Intent(context, ProjectionForegroundService.class)); }
@@ -139,7 +143,40 @@ public class ProjectionForegroundService extends Service {
 
             int id = remote.displayId;
             boolean lineVerified = isLineVerified(id);
+            boolean targetReady = hasRecentTargetChat(id);
+            boolean targetEverSeen = hasEverSeenTargetChat(id);
 
+            // Once a monitored chat has actually been located, fail closed: keep a transparent
+            // Radar Activity focused above LINE and stop bringing LINE to the foreground. If the
+            // chat later goes stale, notify instead of reopening LINE and risking an automatic read.
+            if (lineVerified && targetReady) {
+                ensureNoReadShield(id);
+                if (NoReadShieldActivity.isActiveOnDisplay(id)) {
+                    markMonitorHealthy();
+                    prefs.updateVirtualDisplayStatus(
+                        "Display " + id + " · 目標聊天室已定位 · No-Read Shield 保護中");
+                    prefs.setGlobalStatus("背景＋息屏監控中 · No-Read 保護 · Display " + id);
+                } else {
+                    prefs.updateVirtualDisplayStatus(
+                        "Display " + id + " · 目標聊天室已定位 · 正在啟用 No-Read Shield");
+                    prefs.setGlobalStatus("正在啟用免 Root No-Read 保護");
+                }
+                updateNotification();
+                return;
+            }
+
+            if (targetEverSeen || sessionWasReady) {
+                ensureNoReadShield(id);
+                maybeAlertDisconnect("No-Read 保護：聊天室更新已中斷，Radar 已停止自動開啟 LINE");
+                prefs.updateVirtualDisplayStatus(
+                    "Display " + id + " · No-Read fail-closed · 不自動喚醒聊天室");
+                prefs.setGlobalStatus("監控暫停 · No-Read 保護中 · 請重新啟用背景監控");
+                updateNotification();
+                return;
+            }
+
+            // Initial setup only. Before the target chat has ever been confirmed on this display,
+            // Radar may use heartbeat/hard refresh to find it.
             if (shouldRunRecovery(id)) {
                 if (isHardRefreshDue()) {
                     maybeHardRefreshMonitoredChat(id, lineVerified);
@@ -148,23 +185,14 @@ public class ProjectionForegroundService extends Service {
                 }
             }
 
-            boolean targetReady = hasRecentTargetChat(id);
-
-            if (lineVerified && targetReady) {
-                markMonitorHealthy();
-                prefs.updateVirtualDisplayStatus(
-                    "Display " + id + " · 目標聊天室已定位 · 背景＋息屏監控就緒");
-                prefs.setGlobalStatus("背景＋息屏持續監控中 · Display " + id);
-            } else if (lineVerified) {
-                maybeAlertDisconnect("目標聊天室已停止更新，Radar 正在重新定位");
+            if (lineVerified) {
                 prefs.updateVirtualDisplayStatus(
                     "Display " + id + " · LINE 已驗證 · 尚未定位到監控聊天室");
                 prefs.setGlobalStatus("LINE 已驗證 · 正在定位監控聊天室");
             } else {
-                maybeAlertDisconnect("LINE 第二螢幕已失聯超過 15 秒，Radar 正在自我修復");
                 prefs.updateVirtualDisplayStatus(
-                    "Display " + id + " · LINE root 超過 15 秒未回報 · 自我修復中");
-                prefs.setGlobalStatus("第二畫面自我修復中 · Display " + id);
+                    "Display " + id + " · LINE root 超過 15 秒未回報 · 初次定位修復中");
+                prefs.setGlobalStatus("第二畫面初次定位中 · Display " + id);
                 long now = System.currentTimeMillis();
                 if (!lineLaunchInProgress && !secondaryPollInProgress
                     && now - lastLineLaunchAttemptAt >= LINE_RETRY_MS) {
@@ -213,6 +241,7 @@ public class ProjectionForegroundService extends Service {
 
     private boolean shouldRunRecovery(int id) {
         return id > 0
+            && !NoReadShieldActivity.isActiveOnDisplay(id)
             && prefs.globalEnabled()
             && !prefs.paused()
             && prefs.backgroundActiveCount() > 0
@@ -226,13 +255,44 @@ public class ProjectionForegroundService extends Service {
         return health.hasRecentBackgroundTarget(prefs, id, System.currentTimeMillis());
     }
 
+    private boolean hasEverSeenTargetChat(int id) {
+        if (id <= 0) return false;
+        for (int i = 0; i < Prefs.MAX_SLOTS; i++) {
+            Prefs.Slot slot = prefs.slot(i);
+            if (!slot.backgroundActive()) continue;
+            if (health.targetChatDisplayId(i) == id && health.targetChatSeenAt(i) > 0L) return true;
+        }
+        return false;
+    }
+
     private boolean isHardRefreshDue() {
         return System.currentTimeMillis() - prefs.lastPollAt() >= prefs.pollIntervalMs();
     }
 
+    private void ensureNoReadShield(int id) {
+        if (id <= 0 || NoReadShieldActivity.isActiveOnDisplay(id) || shieldLaunchInProgress) return;
+        long now = System.currentTimeMillis();
+        if (now - lastShieldAttemptAt < SHIELD_RETRY_MS) return;
+        lastShieldAttemptAt = now;
+        shieldLaunchInProgress = true;
+        ShizukuBridge.launchNoReadShieldOnDisplay(id, result -> {
+            shieldLaunchInProgress = false;
+            if (result.success) {
+                prefs.updateVirtualDisplayStatus(
+                    "Display " + id + " · No-Read Shield 啟動中");
+            } else {
+                prefs.updateVirtualDisplayStatus(
+                    "Display " + id + " · No-Read Shield 啟動失敗 · " + result.message);
+                prefs.setGlobalStatus("No-Read 保護啟動失敗 · 已停止自動喚醒 LINE");
+            }
+            updateNotification();
+        });
+    }
+
     private void pulseLineTask(int id) {
         long now = System.currentTimeMillis();
-        if (id <= 0 || linePulseInProgress || secondaryPollInProgress || lineLaunchInProgress
+        if (id <= 0 || NoReadShieldActivity.isActiveOnDisplay(id)
+            || linePulseInProgress || secondaryPollInProgress || lineLaunchInProgress
             || now - lastLinePulseAt < LINE_PULSE_MS) return;
 
         lastLinePulseAt = now;
@@ -242,11 +302,7 @@ public class ProjectionForegroundService extends Service {
             if (pulse.success) {
                 long successAt = System.currentTimeMillis();
                 health.markPulseSuccess(id, successAt);
-                if (hasRecentTargetChat(id)) {
-                    prefs.setGlobalStatus("背景持續監控中 · Display " + id + " · LINE task 活躍");
-                } else {
-                    prefs.setGlobalStatus("LINE task 活躍 · 正在定位監控聊天室");
-                }
+                prefs.setGlobalStatus("LINE task 活躍 · 初次定位監控聊天室");
                 return;
             }
 
@@ -261,7 +317,8 @@ public class ProjectionForegroundService extends Service {
     }
 
     private void maybeHardRefreshMonitoredChat(int id, boolean lineVerified) {
-        if (id <= 0 || secondaryPollInProgress || lineLaunchInProgress || linePulseInProgress) return;
+        if (id <= 0 || NoReadShieldActivity.isActiveOnDisplay(id)
+            || secondaryPollInProgress || lineLaunchInProgress || linePulseInProgress) return;
         if (!shouldRunRecovery(id)) return;
         if (!isHardRefreshDue()) return;
 
@@ -271,7 +328,7 @@ public class ProjectionForegroundService extends Service {
         Prefs.Slot target = prefs.slot(slot);
         long now = System.currentTimeMillis();
         prefs.setLastPollAt(now);
-        prefs.markChecked(slot, now, "第二畫面重新對準中");
+        prefs.markChecked(slot, now, "第二畫面初次定位中");
         secondaryPollInProgress = true;
 
         if (lineVerified) {
@@ -285,9 +342,9 @@ public class ProjectionForegroundService extends Service {
             lineLaunchInProgress = false;
             if (!launch.success) {
                 secondaryPollInProgress = false;
-                prefs.markChecked(slot, System.currentTimeMillis(), "第二畫面重新對準失敗");
+                prefs.markChecked(slot, System.currentTimeMillis(), "第二畫面初次定位失敗");
                 prefs.updateVirtualDisplayStatus(
-                    "Display " + id + " · 無法重新喚醒 LINE · " + launch.message);
+                    "Display " + id + " · 無法喚醒 LINE · " + launch.message);
                 return;
             }
             dispatchPoll(id, slot, target, POLL_OPEN_DELAY_MS);
@@ -309,6 +366,7 @@ public class ProjectionForegroundService extends Service {
 
     private void createDisplayAndLaunchLine() {
         if (displaySetupInProgress) return;
+        NoReadShieldActivity.closeShield();
         displaySetupInProgress = true;
         prefs.setGlobalStatus("正在建立 Shizuku 常駐第二畫面");
 
@@ -323,6 +381,8 @@ public class ProjectionForegroundService extends Service {
             }
 
             health.resetForNewDisplay(display.displayId);
+            sessionWasReady = false;
+            disconnectAlerted = false;
 
             lastLineLaunchAttemptAt = System.currentTimeMillis();
             lineLaunchInProgress = true;
@@ -349,19 +409,20 @@ public class ProjectionForegroundService extends Service {
 
     private void retryLineLaunch() {
         int id = VirtualDisplayEngine.displayId();
-        if (id < 0 || lineLaunchInProgress || secondaryPollInProgress
+        if (id < 0 || NoReadShieldActivity.isActiveOnDisplay(id)
+            || lineLaunchInProgress || secondaryPollInProgress
             || prefs.backgroundActiveCount() <= 0) return;
 
         lastLineLaunchAttemptAt = System.currentTimeMillis();
         lineLaunchInProgress = true;
-        prefs.updateVirtualDisplayStatus("Display " + id + " · 正在把 LINE 拉回第二畫面");
+        prefs.updateVirtualDisplayStatus("Display " + id + " · 正在把 LINE 拉回第二畫面做初次定位");
         VirtualDisplayEngine.launchLine(this, launch -> {
             lineLaunchInProgress = false;
             if (!launch.success) {
                 prefs.updateVirtualDisplayStatus(launch.message);
             } else {
                 prefs.updateVirtualDisplayStatus(
-                    "Display " + id + " · LINE 已重新送入 · 等待 Accessibility 最新畫面");
+                    "Display " + id + " · LINE 已重新送入 · 等待初次定位");
             }
             updateNotification();
         });
@@ -380,6 +441,7 @@ public class ProjectionForegroundService extends Service {
         displayQueryInProgress = false;
         lineLaunchInProgress = false;
         linePulseInProgress = false;
+        shieldLaunchInProgress = false;
         secondaryPollInProgress = false;
         releaseWakeLock();
         super.onDestroy();
@@ -443,18 +505,22 @@ public class ProjectionForegroundService extends Service {
         int id = VirtualDisplayEngine.displayId();
         boolean lineVerified = isLineVerified(id);
         boolean targetReady = hasRecentTargetChat(id);
+        boolean shieldActive = NoReadShieldActivity.isActiveOnDisplay(id);
 
         if (!ShizukuBridge.binderReady()) text = "Shizuku 未啟動 · 監控暫停";
         else if (!ShizukuBridge.permissionGranted()) text = "等待 Shizuku 授權";
         else if (displaySetupInProgress) text = "正在建立 Always-unlocked 第二畫面";
         else if (displayQueryInProgress && id < 0) text = "正在接回 Shizuku 第二畫面";
-        else if (secondaryPollInProgress) text = "Display " + id + " · 正在重新對準聊天室";
-        else if (lineLaunchInProgress) text = "Display " + id + " · 正在把 LINE 拉回第二畫面";
-        else if (linePulseInProgress) text = "Display " + id + " · LINE task heartbeat";
+        else if (shieldLaunchInProgress) text = "Display " + id + " · 正在啟用 No-Read Shield";
+        else if (secondaryPollInProgress) text = "Display " + id + " · 初次定位聊天室";
+        else if (lineLaunchInProgress) text = "Display " + id + " · 初次啟動 LINE";
+        else if (linePulseInProgress) text = "Display " + id + " · 初次定位 heartbeat";
         else if (id < 0) text = "正在建立第二畫面";
-        else if (lineVerified && targetReady) text = "Display " + id + " · 目標聊天室已定位 · 背景＋息屏監控";
-        else if (lineVerified) text = "Display " + id + " · LINE 已驗證 · 正在定位監控聊天室";
-        else if (shouldRunRecovery(id)) text = "Display " + id + " · LINE root 未回報 · 自我修復中";
+        else if (lineVerified && targetReady && shieldActive) text = "Display " + id + " · No-Read Shield · 背景＋息屏監控";
+        else if (lineVerified && targetReady) text = "Display " + id + " · 目標已定位 · 正在啟用 No-Read";
+        else if (hasEverSeenTargetChat(id)) text = "Display " + id + " · No-Read fail-closed · 監控暫停";
+        else if (lineVerified) text = "Display " + id + " · LINE 已驗證 · 初次定位監控聊天室";
+        else if (shouldRunRecovery(id)) text = "Display " + id + " · 初次定位修復中";
         else text = prefs.virtualDisplayStatus();
 
         Notification.Builder b = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
