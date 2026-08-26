@@ -18,10 +18,13 @@ import java.io.InputStreamReader;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 public class RadarShellUserService extends IRadarShellService.Stub {
     private static final String LINE_PACKAGE = "jp.naver.line.android";
     private static final String SHELL_PACKAGE = "com.android.shell";
+    private static final long INPUT_PROCESS_TIMEOUT_MS = 2200L;
+    private static final long AM_PROCESS_TIMEOUT_MS = 3000L;
 
     private static final int FLAG_SUPPORTS_TOUCH = 1 << 6;
     private static final int FLAG_TRUSTED = 1 << 10;
@@ -169,16 +172,19 @@ public class RadarShellUserService extends IRadarShellService.Stub {
                 "-n", componentName
             ).redirectErrorStream(true).start();
 
+            if (!process.waitFor(AM_PROCESS_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                terminateProcess(process);
+                return "ERR:8\nam start timeout after " + AM_PROCESS_TIMEOUT_MS + "ms";
+            }
+
             StringBuilder out = readOutput(process);
-            int code = process.waitFor();
+            int code = process.exitValue();
             if (code == 0) return "OK\n" + out;
             return "ERR:" + code + "\n" + out;
         } catch (Throwable t) {
             return "ERR:1\n" + t.getClass().getSimpleName() + ": " + safe(t.getMessage());
         } finally {
-            if (process != null) {
-                try { process.destroy(); } catch (Throwable ignored) {}
-            }
+            terminateProcess(process);
         }
     }
 
@@ -244,7 +250,7 @@ public class RadarShellUserService extends IRadarShellService.Stub {
         if (!validPoint(startX, startY) || !validPoint(endX, endY)) {
             return "ERR:2\ninvalid swipe coordinates";
         }
-        int duration = Math.max(80, Math.min(1800, durationMs));
+        int duration = Math.max(80, Math.min(1200, durationMs));
         return runInput("swipe", displayId,
             String.valueOf(startX), String.valueOf(startY),
             String.valueOf(endX), String.valueOf(endY),
@@ -268,8 +274,15 @@ public class RadarShellUserService extends IRadarShellService.Stub {
             cmd[3] = command;
             System.arraycopy(args, 0, cmd, 4, args.length);
             process = new ProcessBuilder(cmd).redirectErrorStream(true).start();
+
+            if (!process.waitFor(INPUT_PROCESS_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                terminateProcess(process);
+                return "ERR:8\ninput -d " + displayId + " " + command
+                    + " timeout after " + INPUT_PROCESS_TIMEOUT_MS + "ms";
+            }
+
             StringBuilder out = readOutput(process);
-            int code = process.waitFor();
+            int code = process.exitValue();
             if (code == 0) {
                 return "OK\ninput -d " + displayId + " " + command
                     + (out.length() == 0 ? "" : "\n" + out);
@@ -278,9 +291,20 @@ public class RadarShellUserService extends IRadarShellService.Stub {
         } catch (Throwable t) {
             return "ERR:1\n" + t.getClass().getSimpleName() + ": " + safe(t.getMessage());
         } finally {
-            if (process != null) {
-                try { process.destroy(); } catch (Throwable ignored) {}
+            terminateProcess(process);
+        }
+    }
+
+    private void terminateProcess(Process process) {
+        if (process == null) return;
+        try {
+            if (process.isAlive()) process.destroy();
+            if (process.isAlive() && !process.waitFor(250L, TimeUnit.MILLISECONDS)) {
+                process.destroyForcibly();
+                process.waitFor(250L, TimeUnit.MILLISECONDS);
             }
+        } catch (Throwable ignored) {
+            try { process.destroyForcibly(); } catch (Throwable ignoredAgain) {}
         }
     }
 
@@ -304,12 +328,13 @@ public class RadarShellUserService extends IRadarShellService.Stub {
 
     private StringBuilder readOutput(Process process) throws Exception {
         StringBuilder out = new StringBuilder();
-        BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
-        String line;
-        while ((line = reader.readLine()) != null) {
-            if (out.length() > 0) out.append('\n');
-            out.append(line);
-            if (out.length() > 4000) break;
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (out.length() > 0) out.append('\n');
+                out.append(line);
+                if (out.length() > 4000) break;
+            }
         }
         return out;
     }
