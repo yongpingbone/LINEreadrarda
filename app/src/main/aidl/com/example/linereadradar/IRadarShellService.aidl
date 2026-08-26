@@ -7,4 +7,5 @@ interface IRadarShellService {
     int getVirtualDisplayId() = 3;
     String getVirtualDisplayStatus() = 4;
     void releaseVirtualDisplay() = 5;
+    String pulseAppTaskOnDisplay(String packageName, int displayId) = 6;
 }
