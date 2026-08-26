@@ -187,7 +187,11 @@ public class MainActivity extends Activity {
             TextView checked = text(lastCheckedText(slot.lastCheckedAt), 12, false, MUTED); checked.setPadding(0, dp(9), 0, dp(3)); card.addView(checked);
             LinearLayout bg = row(); bg.setPadding(0, dp(10), 0, dp(5));
             LinearLayout labels = new LinearLayout(this); labels.setOrientation(LinearLayout.VERTICAL);
-            labels.addView(text("背景檢查", 15, true, TEXT)); labels.addView(text("實驗功能，主畫面使用中會自動暫停", 11, false, MUTED));
+            labels.addView(text("背景持續監控", 15, true, TEXT));
+            String backgroundHint = VirtualDisplayEngine.displayId() >= 0
+                ? "第二畫面持續運作，主畫面可正常使用其他 App"
+                : "開啟後請先到 Radar Lab 建立第二畫面";
+            labels.addView(text(backgroundHint, 11, false, MUTED));
             bg.addView(labels, new LinearLayout.LayoutParams(0, -2, 1f));
             Switch sw = systemSwitch(slot.backgroundEnabled); sw.setEnabled(slot.enabled);
             sw.setOnCheckedChangeListener((buttonView, checked2) -> { prefs.setBackgroundEnabled(slot.index, checked2); syncMonitoringRuntime(); renderRadar(); });
@@ -225,8 +229,15 @@ public class MainActivity extends Activity {
             labels.addView(text("暫停全部監控",16,true,TEXT)); labels.addView(text("保留人物、基準與歷史紀錄",12,false,MUTED)); pauseRow.addView(labels,new LinearLayout.LayoutParams(0,-2,1f));
             Switch paused = systemSwitch(prefs.paused()); paused.setOnCheckedChangeListener((b,c)->{prefs.setPaused(c);syncMonitoringRuntime();renderSettings();}); pauseRow.addView(paused); pauseCard.addView(pauseRow); pageHost.addView(pauseCard, marginLp(0,0,0,12));
         }
-        LinearLayout lab = card(CARD); lab.addView(text("Virtual Display + No-Read",16,true,TEXT)); lab.addView(text("實驗版整合測試。",12,false,MUTED)); Button openLab = button("開啟 Radar Lab"); openLab.setOnClickListener(v->startActivity(new Intent(this,ExperimentalLabActivity.class))); lab.addView(openLab,marginLp(0,10,0,0)); pageHost.addView(lab,marginLp(0,0,0,12));
-        LinearLayout interval = card(CARD); interval.addView(text("背景檢查頻率",16,true,TEXT)); interval.addView(text("只有已建立基準且人物卡「背景檢查」為 ON 時使用。",12,false,MUTED)); LinearLayout options=row(); options.setPadding(0,dp(12),0,0); options.addView(intervalButton("30 秒",30000L),new LinearLayout.LayoutParams(0,dp(44),1f)); options.addView(spacer(6)); options.addView(intervalButton("60 秒",60000L),new LinearLayout.LayoutParams(0,dp(44),1f)); options.addView(spacer(6)); options.addView(intervalButton("2 分鐘",120000L),new LinearLayout.LayoutParams(0,dp(44),1f)); interval.addView(options); pageHost.addView(interval,marginLp(0,0,0,12));
+        LinearLayout lab = card(CARD);
+        lab.addView(text("Virtual Display + No-Read",16,true,TEXT));
+        lab.addView(text("建立第二畫面後，LINE 留在第二 Display 持續運作。你在主畫面滑其他 App 時不會暫停監控。",12,false,MUTED));
+        Button openLab = button("開啟 Radar Lab"); openLab.setOnClickListener(v->startActivity(new Intent(this,ExperimentalLabActivity.class))); lab.addView(openLab,marginLp(0,10,0,0)); pageHost.addView(lab,marginLp(0,0,0,12));
+
+        LinearLayout interval = card(CARD);
+        interval.addView(text("第二畫面重新對準頻率",16,true,TEXT));
+        interval.addView(text("單一人物會持續監看；這個頻率主要用來重新確認聊天室，或多人物時輪巡。",12,false,MUTED));
+        LinearLayout options=row(); options.setPadding(0,dp(12),0,0); options.addView(intervalButton("30 秒",30000L),new LinearLayout.LayoutParams(0,dp(44),1f)); options.addView(spacer(6)); options.addView(intervalButton("60 秒",60000L),new LinearLayout.LayoutParams(0,dp(44),1f)); options.addView(spacer(6)); options.addView(intervalButton("2 分鐘",120000L),new LinearLayout.LayoutParams(0,dp(44),1f)); interval.addView(options); pageHost.addView(interval,marginLp(0,0,0,12));
         Button accessibility=button(isAccessibilityServiceEnabled()?"✓ 無障礙服務已開啟":"開啟無障礙服務"); accessibility.setOnClickListener(v->startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))); pageHost.addView(accessibility,marginLp(0,4,0,4));
         Button appSettings=quietButton("App 系統設定"); appSettings.setOnClickListener(v->{Intent i=new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);i.setData(Uri.parse("package:"+getPackageName()));startActivity(i);}); pageHost.addView(appSettings,marginLp(0,4,0,4));
     }
