@@ -16,7 +16,6 @@ import android.os.PowerManager;
 
 public class ProjectionForegroundService extends Service {
     private static final String ACTION_START = "com.example.linereadradar.START_SHIZUKU_DISPLAY";
-    private static final String ACTION_STOP = "com.example.linereadradar.STOP_SHIZUKU_DISPLAY";
     private static final String CHANNEL_ID = "line_radar_shizuku_display_v060";
     private static final int NOTIFICATION_ID = 7355;
     private static final long HEALTH_CHECK_MS = 5000L;
@@ -42,10 +41,7 @@ public class ProjectionForegroundService extends Service {
                 return;
             }
 
-            if (!VirtualDisplayEngine.alive()) {
-                createDisplayAndLaunchLine();
-            }
-
+            if (!VirtualDisplayEngine.alive()) createDisplayAndLaunchLine();
             updateNotification();
             handler.postDelayed(this, HEALTH_CHECK_MS);
         }
@@ -59,16 +55,10 @@ public class ProjectionForegroundService extends Service {
     }
 
     public static void stop(Context context) {
-        new Prefs(context).setVirtualDisplayStopped("第二畫面已手動關閉");
-        Intent i = new Intent(context, ProjectionForegroundService.class);
-        i.setAction(ACTION_STOP);
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(i);
-            else context.startService(i);
-        } catch (Throwable ignored) {
-            context.stopService(new Intent(context, ProjectionForegroundService.class));
-            VirtualDisplayEngine.release();
-        }
+        try { context.stopService(new Intent(context, ProjectionForegroundService.class)); }
+        catch (Throwable ignored) {}
+        VirtualDisplayEngine.release();
+        new Prefs(context).setVirtualDisplayStopped("第二畫面已關閉");
     }
 
     @Override
@@ -81,15 +71,6 @@ public class ProjectionForegroundService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent != null && ACTION_STOP.equals(intent.getAction())) {
-            handler.removeCallbacks(healthCheck);
-            VirtualDisplayEngine.release();
-            releaseWakeLock();
-            stopForeground(true);
-            stopSelf();
-            return START_NOT_STICKY;
-        }
-
         Notification notification = buildNotification();
         if (Build.VERSION.SDK_INT >= 34) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
@@ -99,27 +80,21 @@ public class ProjectionForegroundService extends Service {
 
         if (!ShizukuBridge.binderReady()) {
             VirtualDisplayEngine.setExternalStatus("Shizuku 尚未啟動 · 請先用無線偵錯啟動 Shizuku");
-            updateNotification();
-            handler.removeCallbacks(healthCheck);
-            handler.postDelayed(healthCheck, HEALTH_CHECK_MS);
-            return START_STICKY;
-        }
-
-        if (!ShizukuBridge.permissionGranted()) {
+        } else if (!ShizukuBridge.permissionGranted()) {
             VirtualDisplayEngine.setExternalStatus("Shizuku 已啟動 · 等待 Radar 授權");
-            updateNotification();
-            handler.removeCallbacks(healthCheck);
-            handler.postDelayed(healthCheck, HEALTH_CHECK_MS);
-            return START_STICKY;
+        } else if (!VirtualDisplayEngine.alive()) {
+            createDisplayAndLaunchLine();
         }
 
-        createDisplayAndLaunchLine();
         handler.removeCallbacks(healthCheck);
         handler.postDelayed(healthCheck, HEALTH_CHECK_MS);
+        updateNotification();
         return START_STICKY;
     }
 
     private void createDisplayAndLaunchLine() {
+        if (VirtualDisplayEngine.alive()) return;
+
         VirtualDisplayEngine.Result display = VirtualDisplayEngine.create(this);
         if (!display.success) {
             prefs.setVirtualDisplayStopped(display.message);
@@ -192,6 +167,7 @@ public class ProjectionForegroundService extends Service {
         boolean lineVerified = id >= 0
             && prefs.secondaryLineDisplayId() == id
             && System.currentTimeMillis() - prefs.secondaryLineSeenAt() <= 15000L;
+
         if (!ShizukuBridge.binderReady()) text = "Shizuku 未啟動 · 監控暫停";
         else if (!ShizukuBridge.permissionGranted()) text = "等待 Shizuku 授權";
         else if (id < 0) text = "正在建立第二畫面";
