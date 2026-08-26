@@ -33,13 +33,6 @@
             android:exported="false"
             android:label="Radar Lab" />
 
-        <!--
-             Shizuku Wireless Debugging runs as Android shell (UID 2000). The shell process must be
-             allowed to start this Activity on the secondary display, so exported=false cannot work
-             in the final no-root architecture. Restrict the exported entry point with DUMP, a
-             platform permission held by com.android.shell, instead of exposing a generally
-             launchable Activity to ordinary third-party apps.
-        -->
         <activity
             android:name=".NoReadShieldActivity"
             android:exported="true"
@@ -64,7 +57,7 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Keeps the non-root Shizuku virtual display alive for the user's explicit LINE monitoring session." />
+                android:value="Keeps LINE Radar's user-enabled safe background monitoring session alive." />
         </service>
 
         <service
@@ -78,6 +71,16 @@
             <meta-data
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
+        </service>
+
+        <service
+            android:name=".LineNotificationListener"
+            android:label="LINE Radar"
+            android:exported="true"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
         </service>
 
         <provider
