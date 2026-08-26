@@ -18,7 +18,7 @@ public class MonitorForegroundService extends Service {
     static final String ACTION_POLL = "com.example.linereadradar.POLL";
     static final String EXTRA_SLOT = "slot";
 
-    private static final String CHANNEL_ID = "line_read_radar_background_v058";
+    private static final String CHANNEL_ID = "line_radar_legacy_status_silent_v070";
     private static final int NOTIFICATION_ID = 7310;
     private static final long HEARTBEAT_MS = 5000L;
     private static final long RETRY_LOCKED_MS = 15000L;
@@ -175,12 +175,17 @@ public class MonitorForegroundService extends Service {
     private void ensureChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationManager nm = getSystemService(NotificationManager.class);
+            if (nm == null) return;
             NotificationChannel channel = new NotificationChannel(
                 CHANNEL_ID,
-                "監控狀態",
+                "監控狀態（靜默）",
                 NotificationManager.IMPORTANCE_MIN
             );
-            channel.setDescription("只有未使用第二 Display 的舊式背景檢查才會顯示");
+            channel.setDescription("Android 前景服務必要狀態；不彈出、不震動、不發聲");
+            channel.setSound(null, null);
+            channel.enableVibration(false);
+            channel.setShowBadge(false);
+            channel.setLockscreenVisibility(Notification.VISIBILITY_PRIVATE);
             nm.createNotificationChannel(channel);
         }
     }
@@ -208,9 +213,12 @@ public class MonitorForegroundService extends Service {
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
+            .setSilent(true)
             .setShowWhen(false)
             .setCategory(Notification.CATEGORY_SERVICE)
             .setVisibility(Notification.VISIBILITY_PRIVATE)
+            .setPriority(Notification.PRIORITY_MIN)
+            .setLocalOnly(true)
             .build();
     }
 
