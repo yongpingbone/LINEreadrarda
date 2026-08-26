@@ -2,7 +2,7 @@ name: Build LINE Radar APK
 
 on:
   push:
-    branches: [ main, ui/v0.4.2-person-first, exp/v0.5.2-display-noread ]
+    branches: [ main, ui/v0.4.2-person-first, exp/v0.5.2-display-noread, exp/v0.6-shizuku-noroot ]
   workflow_dispatch:
 
 permissions:
@@ -36,14 +36,12 @@ jobs:
         run: gradle --no-daemon clean assembleDebug
 
       - name: Rename APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk LINE-Radar-v0.5.8-Exp.apk
+        run: cp app/build/outputs/apk/debug/app-debug.apk LINE-Radar-v0.6.0-Shizuku.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: LINE-Radar-v0.5.8-Exp
-          path: LINE-Radar-v0.5.8-Exp.apk
+          name: LINE-Radar-v0.6.0-Shizuku
+          path: LINE-Radar-v0.6.0-Shizuku.apk
           if-no-files-found: error
           retention-days: 14
-
-# v0.5.8-exp: single persistent Radar status, clearer second-display success, explicit lock-screen interruption alert
