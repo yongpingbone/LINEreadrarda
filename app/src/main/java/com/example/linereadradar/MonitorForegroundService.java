@@ -30,8 +30,6 @@ public class MonitorForegroundService extends Service {
         @Override
         public void run() {
             if (VirtualDisplayEngine.displayId() >= 0) {
-                // ProjectionForegroundService already owns the foreground lifetime and status
-                // notification while the second display exists. Avoid a duplicate notification.
                 stopForeground(true);
                 stopSelf();
                 return;
@@ -213,7 +211,6 @@ public class MonitorForegroundService extends Service {
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
-            .setSilent(true)
             .setShowWhen(false)
             .setCategory(Notification.CATEGORY_SERVICE)
             .setVisibility(Notification.VISIBILITY_PRIVATE)
