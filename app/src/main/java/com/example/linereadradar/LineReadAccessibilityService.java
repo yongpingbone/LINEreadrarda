@@ -37,7 +37,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
     static final String ACTION_BASELINE = "com.example.linereadradar.BASELINE";
 
     private static final String LINE_PACKAGE = "jp.naver.line.android";
-    private static final String CHANNEL_ID = "line_read_radar_events_v065";
+    private static final String CHANNEL_ID = "line_read_radar_events_v067";
     private static final long DEBOUNCE_MS = 250L;
     private static final long WATCHDOG_MS = 700L;
     private static final long REQUEST_TIMEOUT_MS = 15000L;
@@ -62,6 +62,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
     );
 
     private Prefs prefs;
+    private HealthDiagnostics health;
     private long lastScanAt = 0L;
     private long lastSecondaryDiagnosticAt = 0L;
     private int requestedSlot = -1;
@@ -126,6 +127,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
     public void onCreate() {
         super.onCreate();
         prefs = new Prefs(this);
+        health = new HealthDiagnostics(this);
         ensureNotificationChannel();
         IntentFilter filter = new IntentFilter();
         filter.addAction(MonitorForegroundService.ACTION_POLL);
@@ -312,6 +314,31 @@ public class LineReadAccessibilityService extends AccessibilityService {
             return;
         }
 
+        boolean secondaryMode = isSecondaryBackgroundMode(slot);
+        if (secondaryMode) {
+            int displayId = prefs.virtualDisplayId();
+            health.markTargetChatScan(
+                slot.index,
+                displayId,
+                buildDiagnosticTreeSignature(scan),
+                now
+            );
+
+            // The main-screen baseline and the second Display can have different
+            // Accessibility row coordinates/layout. The first real target-chat scan
+            // on each newly created secondary Display is therefore a takeover
+            // calibration only. It must never generate a message/read event.
+            if (!health.isSecondaryCalibrated(slot.index, displayId)) {
+                prefs.updateReadBaseline(slot.index, scan.readCount, scan.maxReadBottom, now);
+                prefs.updateIncomingSignature(slot.index, scan.incomingSignature, now);
+                health.markSecondaryCalibrated(slot.index, displayId);
+                prefs.markChecked(slot.index, now, "第二畫面基準已同步 · 監控中");
+                prefs.setGlobalStatus("第二畫面已接管「" + slot.name + "」· 基準同步完成");
+                if (automatedPoll) clearRequest(false);
+                return;
+            }
+        }
+
         boolean eventFired = false;
         boolean detectorRebased = false;
 
@@ -323,7 +350,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
                 ReadDetector.Snapshot baseline = new ReadDetector.Snapshot(slot.baseCount, slot.baseMaxY);
                 ReadDetector.Snapshot current = new ReadDetector.Snapshot(scan.readCount, scan.maxReadBottom);
                 float density = getResources().getDisplayMetrics().density;
-                int thresholdPx = isSecondaryBackgroundMode(slot)
+                int thresholdPx = secondaryMode
                     ? Math.max(6, (int) (6 * density))
                     : Math.max(24, (int) (36 * density));
 
@@ -368,6 +395,15 @@ public class LineReadAccessibilityService extends AccessibilityService {
         prefs.setGlobalStatus("剛檢查「" + slot.name + "」");
 
         if (automatedPoll) clearRequest(false);
+    }
+
+    private String buildDiagnosticTreeSignature(ScanResult scan) {
+        if (scan == null) return "";
+        String raw = (scan.targetVisible ? "1" : "0")
+            + "|" + scan.readCount
+            + "|" + scan.maxReadBottom
+            + "|" + scan.incomingSignature;
+        return Integer.toHexString(raw.hashCode());
     }
 
     private String sanitizeHistoryText(String value) {
@@ -440,7 +476,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
                             lineOnPreferredDisplay = true;
                             prefs.markSecondaryLineSeen(displayId, System.currentTimeMillis());
                             prefs.updateVirtualDisplayStatus(
-                                "Display " + displayId + " · Accessibility 已看到 LINE · 驗證完成");
+                                "Display " + displayId + " · Accessibility 已看到 LINE root");
                         }
 
                         if (preferSecondary && preferredDisplayId >= 0 && !onPreferred) continue;
