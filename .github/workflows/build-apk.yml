@@ -36,14 +36,14 @@ jobs:
         run: gradle --no-daemon clean assembleDebug
 
       - name: Rename APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk LINE-Radar-v0.5.4-Exp.apk
+        run: cp app/build/outputs/apk/debug/app-debug.apk LINE-Radar-v0.5.5-Exp.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: LINE-Radar-v0.5.4-Exp
-          path: LINE-Radar-v0.5.4-Exp.apk
+          name: LINE-Radar-v0.5.5-Exp
+          path: LINE-Radar-v0.5.5-Exp.apk
           if-no-files-found: error
           retention-days: 14
 
-# v0.5.4-exp: first monitoring setup works after Radar leaves the screen; no floating-window requirement
+# v0.5.5-exp: request user-approved MediaProjection before creating a public Virtual Display
