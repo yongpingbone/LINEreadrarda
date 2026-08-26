@@ -34,6 +34,8 @@ public class RadarShellUserService extends IRadarShellService.Stub {
                 "am", "start",
                 "--user", "0",
                 "--display", String.valueOf(displayId),
+                "--activity-exclude-from-recents",
+                "--activity-no-animation",
                 "-n", componentName
             ).redirectErrorStream(true).start();
 
