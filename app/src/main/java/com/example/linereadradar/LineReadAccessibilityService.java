@@ -37,16 +37,17 @@ public class LineReadAccessibilityService extends AccessibilityService {
     static final String ACTION_BASELINE = "com.example.linereadradar.BASELINE";
 
     private static final String LINE_PACKAGE = "jp.naver.line.android";
-    private static final String CHANNEL_ID = "line_read_radar_events_v068";
+    private static final String CHANNEL_ID = "line_read_radar_events_v069";
     private static final long DEBOUNCE_MS = 250L;
     private static final long WATCHDOG_MS = 700L;
-    private static final long REQUEST_TIMEOUT_MS = 20000L;
+    private static final long REQUEST_TIMEOUT_MS = 25000L;
     private static final long MANUAL_SESSION_GAP_MS = 1600L;
     private static final long MANUAL_STABLE_MS = 1000L;
     private static final long SECONDARY_DIAGNOSTIC_MS = 1500L;
     private static final long NAVIGATION_COOLDOWN_MS = 650L;
     private static final long TARGET_OPEN_WAIT_MS = 1500L;
     private static final int MAX_BACK_STEPS = 3;
+    private static final int MAX_CHAT_TAB_TAP_ATTEMPTS = 2;
     private static final int MAX_SCROLL_TO_TOP_STEPS = 4;
     private static final int MAX_SCROLL_FORWARD_STEPS = 10;
 
@@ -60,10 +61,6 @@ public class LineReadAccessibilityService extends AccessibilityService {
 
     private static final Set<String> CHAT_TAB_LABELS = setOf(
         "聊天", "Chats", "Talk", "トーク", "채팅"
-    );
-
-    private static final Set<String> BACK_LABELS = setOf(
-        "返回", "Back", "BACK", "back", "上一頁", "上一页", "戻る", "뒤로"
     );
 
     private static final Set<String> UI_LABELS = setOf(
@@ -84,15 +81,15 @@ public class LineReadAccessibilityService extends AccessibilityService {
     private boolean clickedTargetDuringRequest = false;
     private boolean baselineRequest = false;
 
-    // Bounded navigation state used by hard refresh. The request first looks for
-    // the target in the current tree, then resets LINE to the Chats tab, then
-    // scans a bounded number of chat-list pages. It never loops forever.
     private boolean requestChatsTabOpened = false;
+    private int requestChatsTabTapAttempts = 0;
     private int requestBackSteps = 0;
     private int requestScrollToTopSteps = 0;
     private int requestScrollForwardSteps = 0;
     private long requestLastNavigationAt = 0L;
     private long requestTargetClickAt = 0L;
+    private boolean navigationActionInProgress = false;
+    private int requestSerial = 0;
 
     private int manualVisibleSlot = -1;
     private long manualVisibleSince = 0L;
@@ -142,6 +139,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
             requestStartedAt = System.currentTimeMillis();
             clickedTargetDuringRequest = false;
             baselineRequest = ACTION_BASELINE.equals(action);
+            requestSerial++;
             resetRequestNavigationState();
             handler.removeCallbacks(timeoutRunnable);
             handler.postDelayed(timeoutRunnable, REQUEST_TIMEOUT_MS);
@@ -217,72 +215,260 @@ public class LineReadAccessibilityService extends AccessibilityService {
             return;
         }
 
+        if (!secondaryMode) {
+            AccessibilityNodeInfo root = findLineRootForAutomation(false);
+            if (root != null && !clickedTargetDuringRequest && clickTargetWithAccessibility(root, slot.name)) {
+                clickedTargetDuringRequest = true;
+                requestTargetClickAt = now;
+                prefs.markChecked(slot.index, now, "正在開啟聊天室建立基準");
+            }
+            if (now - requestStartedAt > REQUEST_TIMEOUT_MS) timeoutRunnable.run();
+            return;
+        }
+
+        if (navigationActionInProgress) return;
+
         if (clickedTargetDuringRequest) {
             if (now - requestTargetClickAt < TARGET_OPEN_WAIT_MS) return;
             clickedTargetDuringRequest = false;
         }
-
         if (now - requestLastNavigationAt < NAVIGATION_COOLDOWN_MS) return;
 
-        // Background hard refresh must only navigate the second Display. Never
-        // fall back to a main-screen LINE root just because the secondary root is
-        // temporarily missing.
-        AccessibilityNodeInfo root = findLineRootForAutomation(secondaryMode);
-        if (root != null) {
-            if (clickTargetInTree(root, slot.name)) {
-                clickedTargetDuringRequest = true;
-                requestTargetClickAt = now;
-                requestLastNavigationAt = now;
-                prefs.markChecked(slot.index, now, baselineRequest
-                    ? "正在開啟聊天室建立基準"
-                    : "已找到目標 · 正在進入第二畫面聊天室");
+        AccessibilityNodeInfo root = findLineRootForAutomation(true);
+        if (root == null) {
+            if (now - requestStartedAt > REQUEST_TIMEOUT_MS) timeoutRunnable.run();
+            return;
+        }
+
+        int displayId = prefs.virtualDisplayId();
+        if (displayId <= 0) {
+            if (now - requestStartedAt > REQUEST_TIMEOUT_MS) timeoutRunnable.run();
+            return;
+        }
+
+        Rect targetBounds = findTargetBounds(root, slot.name);
+        if (targetBounds != null) {
+            sendSecondaryTap(slot, displayId, targetBounds, "TARGET_TAP", now,
+                () -> {
+                    clickedTargetDuringRequest = true;
+                    requestTargetClickAt = System.currentTimeMillis();
+                    prefs.markChecked(slot.index, requestTargetClickAt,
+                        "已找到目標 · 正在進入第二畫面聊天室");
+                });
+            return;
+        }
+
+        if (!requestChatsTabOpened) {
+            Rect chatsBounds = findChatsTabBounds(root);
+            if (chatsBounds != null && requestChatsTabTapAttempts < MAX_CHAT_TAB_TAP_ATTEMPTS) {
+                requestChatsTabTapAttempts++;
+                sendSecondaryTap(slot, displayId, chatsBounds, "CHATS_TAB_TAP", now,
+                    () -> {
+                        requestChatsTabOpened = true;
+                        requestScrollToTopSteps = 0;
+                        requestScrollForwardSteps = 0;
+                        long at = System.currentTimeMillis();
+                        prefs.markChecked(slot.index, at,
+                            "已切到 LINE 聊天列表 · 正在搜尋「" + slot.name + "」");
+                    });
                 return;
             }
 
-            if (!requestChatsTabOpened) {
-                if (clickChatsTabInTree(root)) {
-                    requestChatsTabOpened = true;
-                    requestScrollToTopSteps = 0;
-                    requestScrollForwardSteps = 0;
-                    requestLastNavigationAt = now;
-                    prefs.markChecked(slot.index, now, "已復位到 LINE 聊天列表 · 正在搜尋「" + slot.name + "」");
-                    return;
-                }
-
-                if (requestBackSteps < MAX_BACK_STEPS && clickBackInTree(root)) {
-                    requestBackSteps++;
-                    requestLastNavigationAt = now;
-                    prefs.markChecked(slot.index, now,
-                        "正在退出目前 LINE 頁面 · 尋找聊天列表 " + requestBackSteps + "/" + MAX_BACK_STEPS);
-                    return;
-                }
-            } else {
-                if (requestScrollToTopSteps < MAX_SCROLL_TO_TOP_STEPS) {
-                    if (scrollLargestScrollableNode(root, AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)) {
-                        requestScrollToTopSteps++;
-                        requestLastNavigationAt = now;
-                        prefs.markChecked(slot.index, now, "聊天列表復位中 · 正在回到頂端");
-                        return;
-                    }
-                    requestScrollToTopSteps = MAX_SCROLL_TO_TOP_STEPS;
-                }
-
-                if (requestScrollForwardSteps < MAX_SCROLL_FORWARD_STEPS) {
-                    if (scrollLargestScrollableNode(root, AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)) {
-                        requestScrollForwardSteps++;
-                        requestLastNavigationAt = now;
-                        prefs.markChecked(slot.index, now,
-                            "聊天列表搜尋中 · 第 " + (requestScrollForwardSteps + 1) + " 頁");
-                        return;
-                    }
-                    requestScrollForwardSteps = MAX_SCROLL_FORWARD_STEPS;
-                }
-
-                prefs.markChecked(slot.index, now, "已回聊天列表 · 目前可見清單仍找不到「" + slot.name + "」");
+            if (requestBackSteps < MAX_BACK_STEPS) {
+                sendSecondaryBack(slot, displayId, now);
+                return;
             }
+
+            // Back 已有限次嘗試。若底部分頁有 bounds，就再試一次 Chats；
+            // 否則將目前 LINE root 視為可能的聊天列表，進入 bounded scroll。
+            if (chatsBounds != null) {
+                sendSecondaryTap(slot, displayId, chatsBounds, "CHATS_TAB_FINAL_TAP", now,
+                    () -> {
+                        requestChatsTabOpened = true;
+                        requestScrollToTopSteps = 0;
+                        requestScrollForwardSteps = 0;
+                    });
+                return;
+            }
+            requestChatsTabOpened = true;
+            requestScrollToTopSteps = 0;
+            requestScrollForwardSteps = 0;
+            requestLastNavigationAt = now;
+            prefs.markChecked(slot.index, now, "正在掃描目前 LINE 清單 · 尋找「" + slot.name + "」");
+            return;
         }
 
+        if (requestScrollToTopSteps < MAX_SCROLL_TO_TOP_STEPS) {
+            sendSecondarySwipe(slot, displayId, root, true, now);
+            return;
+        }
+
+        if (requestScrollForwardSteps < MAX_SCROLL_FORWARD_STEPS) {
+            sendSecondarySwipe(slot, displayId, root, false, now);
+            return;
+        }
+
+        prefs.markChecked(slot.index, now, "已掃描聊天列表 · 尚未看到「" + slot.name + "」");
         if (now - requestStartedAt > REQUEST_TIMEOUT_MS) timeoutRunnable.run();
+    }
+
+    private void sendSecondaryTap(Prefs.Slot slot, int displayId, Rect bounds,
+                                  String action, long now, Runnable onSuccess) {
+        if (bounds == null || bounds.width() <= 0 || bounds.height() <= 0) return;
+        int x = Math.max(0, bounds.centerX());
+        int y = Math.max(0, bounds.centerY());
+        int serial = requestSerial;
+        navigationActionInProgress = true;
+        requestLastNavigationAt = now;
+        ShizukuBridge.tapOnDisplay(displayId, x, y, result -> {
+            long at = System.currentTimeMillis();
+            health.markNavigation(displayId, action + " @ " + x + "," + y,
+                result.success, result.message, at);
+            if (serial != requestSerial || requestedSlot != slot.index) return;
+            navigationActionInProgress = false;
+            requestLastNavigationAt = at;
+            if (result.success) {
+                if (onSuccess != null) onSuccess.run();
+            } else {
+                prefs.markChecked(slot.index, at, "第二畫面導航失敗 · " + action);
+            }
+        });
+    }
+
+    private void sendSecondaryBack(Prefs.Slot slot, int displayId, long now) {
+        int serial = requestSerial;
+        int attempt = requestBackSteps + 1;
+        navigationActionInProgress = true;
+        requestLastNavigationAt = now;
+        ShizukuBridge.backOnDisplay(displayId, result -> {
+            long at = System.currentTimeMillis();
+            health.markNavigation(displayId, "BACK " + attempt + "/" + MAX_BACK_STEPS,
+                result.success, result.message, at);
+            if (serial != requestSerial || requestedSlot != slot.index) return;
+            navigationActionInProgress = false;
+            requestLastNavigationAt = at;
+            if (result.success) {
+                requestBackSteps++;
+                prefs.markChecked(slot.index, at,
+                    "第二畫面返回上一層 · " + requestBackSteps + "/" + MAX_BACK_STEPS);
+            } else {
+                prefs.markChecked(slot.index, at, "第二畫面 BACK 失敗");
+            }
+        });
+    }
+
+    private void sendSecondarySwipe(Prefs.Slot slot, int displayId, AccessibilityNodeInfo root,
+                                    boolean towardTop, long now) {
+        Rect rb = new Rect();
+        root.getBoundsInScreen(rb);
+        int width = rb.width() > 0 ? rb.width() : 720;
+        int height = rb.height() > 0 ? rb.height() : 1280;
+        int left = rb.width() > 0 ? rb.left : 0;
+        int top = rb.height() > 0 ? rb.top : 0;
+        int x = left + width / 2;
+        int upper = top + (int) (height * 0.34f);
+        int lower = top + (int) (height * 0.78f);
+        int startY = towardTop ? upper : lower;
+        int endY = towardTop ? lower : upper;
+        int serial = requestSerial;
+        String action = towardTop ? "SCROLL_TO_TOP" : "SCROLL_FORWARD";
+        int step = towardTop ? requestScrollToTopSteps + 1 : requestScrollForwardSteps + 1;
+
+        navigationActionInProgress = true;
+        requestLastNavigationAt = now;
+        ShizukuBridge.swipeOnDisplay(displayId, x, startY, x, endY, 260, result -> {
+            long at = System.currentTimeMillis();
+            health.markNavigation(displayId, action + " " + step,
+                result.success, result.message, at);
+            if (serial != requestSerial || requestedSlot != slot.index) return;
+            navigationActionInProgress = false;
+            requestLastNavigationAt = at;
+            if (result.success) {
+                if (towardTop) {
+                    requestScrollToTopSteps++;
+                    prefs.markChecked(slot.index, at,
+                        "聊天列表復位中 · " + requestScrollToTopSteps + "/" + MAX_SCROLL_TO_TOP_STEPS);
+                } else {
+                    requestScrollForwardSteps++;
+                    prefs.markChecked(slot.index, at,
+                        "聊天列表搜尋中 · " + requestScrollForwardSteps + "/" + MAX_SCROLL_FORWARD_STEPS);
+                }
+            } else {
+                prefs.markChecked(slot.index, at, "第二畫面滑動失敗 · " + action);
+            }
+        });
+    }
+
+    private Rect findTargetBounds(AccessibilityNodeInfo root, String target) {
+        if (root == null) return null;
+        List<AccessibilityNodeInfo> matches = root.findAccessibilityNodeInfosByText(target);
+        if (matches == null) return null;
+        Rect best = null;
+        long bestArea = Long.MAX_VALUE;
+        for (AccessibilityNodeInfo node : matches) {
+            if (node == null) continue;
+            String text = node.getText() == null ? "" : node.getText().toString();
+            String desc = node.getContentDescription() == null ? "" : node.getContentDescription().toString();
+            if (!matchesTarget(text, target) && !matchesTarget(desc, target)) continue;
+            Rect r = new Rect();
+            node.getBoundsInScreen(r);
+            if (r.width() <= 0 || r.height() <= 0) continue;
+            long area = (long) r.width() * r.height();
+            if (area < bestArea) {
+                bestArea = area;
+                best = new Rect(r);
+            }
+        }
+        return best;
+    }
+
+    private Rect findChatsTabBounds(AccessibilityNodeInfo root) {
+        if (root == null) return null;
+        Rect rootBounds = new Rect();
+        root.getBoundsInScreen(rootBounds);
+        int minY = rootBounds.top + (int) (rootBounds.height() * 0.52f);
+        Rect best = null;
+        long bestArea = Long.MAX_VALUE;
+
+        for (String label : CHAT_TAB_LABELS) {
+            List<AccessibilityNodeInfo> matches = root.findAccessibilityNodeInfosByText(label);
+            if (matches == null) continue;
+            for (AccessibilityNodeInfo node : matches) {
+                if (node == null) continue;
+                String text = normalize(node.getText() == null ? "" : node.getText().toString());
+                String desc = normalize(node.getContentDescription() == null ? "" : node.getContentDescription().toString());
+                if (!CHAT_TAB_LABELS.contains(text) && !CHAT_TAB_LABELS.contains(desc)) continue;
+                Rect r = new Rect();
+                node.getBoundsInScreen(r);
+                if (r.width() <= 0 || r.height() <= 0 || r.centerY() < minY) continue;
+                long area = (long) r.width() * r.height();
+                if (area < bestArea) {
+                    bestArea = area;
+                    best = new Rect(r);
+                }
+            }
+        }
+        return best;
+    }
+
+    private boolean clickTargetWithAccessibility(AccessibilityNodeInfo root, String target) {
+        if (root == null) return false;
+        List<AccessibilityNodeInfo> matches = root.findAccessibilityNodeInfosByText(target);
+        if (matches == null) return false;
+        for (AccessibilityNodeInfo node : matches) {
+            if (node == null) continue;
+            String text = node.getText() == null ? "" : node.getText().toString();
+            String desc = node.getContentDescription() == null ? "" : node.getContentDescription().toString();
+            if (!matchesTarget(text, target) && !matchesTarget(desc, target)) continue;
+            AccessibilityNodeInfo clickable = node;
+            for (int depth = 0; depth < 6 && clickable != null; depth++) {
+                if (clickable.isClickable() && clickable.isVisibleToUser()) {
+                    return clickable.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+                }
+                clickable = clickable.getParent();
+            }
+        }
+        return false;
     }
 
     private AccessibilityNodeInfo findLineRootForAutomation(boolean secondaryOnly) {
@@ -406,9 +592,6 @@ public class LineReadAccessibilityService extends AccessibilityService {
                 now
             );
 
-            // Main-screen and secondary Display layouts can differ. The first
-            // real target-chat scan on each new Display is a takeover calibration,
-            // never an event.
             if (!health.isSecondaryCalibrated(slot.index, displayId)) {
                 prefs.updateReadBaseline(slot.index, scan.readCount, scan.maxReadBottom, now);
                 prefs.updateIncomingSignature(slot.index, scan.incomingSignature, now);
@@ -499,6 +682,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
         requestStartedAt = 0L;
         clickedTargetDuringRequest = false;
         baselineRequest = false;
+        requestSerial++;
         resetRequestNavigationState();
         handler.removeCallbacks(timeoutRunnable);
         if (returnHome) handler.postDelayed(() -> performGlobalAction(GLOBAL_ACTION_HOME), 550L);
@@ -506,138 +690,13 @@ public class LineReadAccessibilityService extends AccessibilityService {
 
     private void resetRequestNavigationState() {
         requestChatsTabOpened = false;
+        requestChatsTabTapAttempts = 0;
         requestBackSteps = 0;
         requestScrollToTopSteps = 0;
         requestScrollForwardSteps = 0;
         requestLastNavigationAt = 0L;
         requestTargetClickAt = 0L;
-    }
-
-    private boolean clickTargetInTree(AccessibilityNodeInfo root, String target) {
-        if (root == null) return false;
-        List<AccessibilityNodeInfo> matches = root.findAccessibilityNodeInfosByText(target);
-        if (matches == null) return false;
-        for (AccessibilityNodeInfo node : matches) {
-            if (node == null) continue;
-            String text = node.getText() == null ? "" : node.getText().toString();
-            String desc = node.getContentDescription() == null ? "" : node.getContentDescription().toString();
-            if (!matchesTarget(text, target) && !matchesTarget(desc, target)) continue;
-            if (clickNodeOrAncestor(node)) return true;
-        }
-        return false;
-    }
-
-    private boolean clickChatsTabInTree(AccessibilityNodeInfo root) {
-        if (root == null) return false;
-        Rect rootBounds = new Rect();
-        root.getBoundsInScreen(rootBounds);
-        int minY = rootBounds.top + (int) (rootBounds.height() * 0.52f);
-
-        for (String label : CHAT_TAB_LABELS) {
-            List<AccessibilityNodeInfo> matches = root.findAccessibilityNodeInfosByText(label);
-            if (matches == null) continue;
-            for (AccessibilityNodeInfo node : matches) {
-                if (node == null) continue;
-                String text = normalize(node.getText() == null ? "" : node.getText().toString());
-                String desc = normalize(node.getContentDescription() == null ? "" : node.getContentDescription().toString());
-                if (!CHAT_TAB_LABELS.contains(text) && !CHAT_TAB_LABELS.contains(desc)) continue;
-                Rect r = new Rect();
-                node.getBoundsInScreen(r);
-                if (r.centerY() < minY) continue;
-                if (clickNodeOrAncestor(node)) return true;
-            }
-        }
-        return false;
-    }
-
-    private boolean clickBackInTree(AccessibilityNodeInfo root) {
-        if (root == null) return false;
-        Rect rootBounds = new Rect();
-        root.getBoundsInScreen(rootBounds);
-        int maxY = rootBounds.top + (int) (rootBounds.height() * 0.28f);
-
-        for (String label : BACK_LABELS) {
-            List<AccessibilityNodeInfo> matches = root.findAccessibilityNodeInfosByText(label);
-            if (matches == null) continue;
-            for (AccessibilityNodeInfo node : matches) {
-                if (node == null) continue;
-                Rect r = new Rect();
-                node.getBoundsInScreen(r);
-                if (r.centerY() > maxY) continue;
-                String text = normalize(node.getText() == null ? "" : node.getText().toString());
-                String desc = normalize(node.getContentDescription() == null ? "" : node.getContentDescription().toString());
-                if (!BACK_LABELS.contains(text) && !BACK_LABELS.contains(desc)) continue;
-                if (clickNodeOrAncestor(node)) return true;
-            }
-        }
-
-        // Some LINE builds expose the back arrow without a textual label. In that
-        // case choose a small clickable action in the top-left header of this LINE
-        // root. This stays inside the secondary Display tree and avoids a global
-        // Android Back action that could affect the user's main screen.
-        AccessibilityNodeInfo best = null;
-        long bestArea = Long.MAX_VALUE;
-        Deque<AccessibilityNodeInfo> stack = new ArrayDeque<>();
-        stack.push(root);
-        int maxX = rootBounds.left + (int) (rootBounds.width() * 0.28f);
-        while (!stack.isEmpty()) {
-            AccessibilityNodeInfo node = stack.pop();
-            if (node.isVisibleToUser() && node.isClickable()) {
-                Rect r = new Rect();
-                node.getBoundsInScreen(r);
-                if (r.centerX() <= maxX && r.centerY() <= maxY
-                    && r.width() > 0 && r.height() > 0
-                    && r.width() < rootBounds.width() * 0.35f
-                    && r.height() < rootBounds.height() * 0.20f) {
-                    long area = (long) r.width() * (long) r.height();
-                    if (area < bestArea) {
-                        bestArea = area;
-                        best = node;
-                    }
-                }
-            }
-            for (int i = 0; i < node.getChildCount(); i++) {
-                AccessibilityNodeInfo child = node.getChild(i);
-                if (child != null) stack.push(child);
-            }
-        }
-        return best != null && best.performAction(AccessibilityNodeInfo.ACTION_CLICK);
-    }
-
-    private boolean clickNodeOrAncestor(AccessibilityNodeInfo node) {
-        AccessibilityNodeInfo clickable = node;
-        for (int depth = 0; depth < 6 && clickable != null; depth++) {
-            if (clickable.isClickable() && clickable.isVisibleToUser()) {
-                return clickable.performAction(AccessibilityNodeInfo.ACTION_CLICK);
-            }
-            clickable = clickable.getParent();
-        }
-        return false;
-    }
-
-    private boolean scrollLargestScrollableNode(AccessibilityNodeInfo root, int action) {
-        if (root == null) return false;
-        AccessibilityNodeInfo best = null;
-        long bestArea = -1L;
-        Deque<AccessibilityNodeInfo> stack = new ArrayDeque<>();
-        stack.push(root);
-        while (!stack.isEmpty()) {
-            AccessibilityNodeInfo node = stack.pop();
-            if (node.isVisibleToUser() && node.isScrollable()) {
-                Rect r = new Rect();
-                node.getBoundsInScreen(r);
-                long area = (long) Math.max(0, r.width()) * (long) Math.max(0, r.height());
-                if (area > bestArea) {
-                    bestArea = area;
-                    best = node;
-                }
-            }
-            for (int i = 0; i < node.getChildCount(); i++) {
-                AccessibilityNodeInfo child = node.getChild(i);
-                if (child != null) stack.push(child);
-            }
-        }
-        return best != null && best.performAction(action);
+        navigationActionInProgress = false;
     }
 
     private ScanResult scanAvailableLineWindows(String target) {
