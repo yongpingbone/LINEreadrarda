@@ -47,6 +47,7 @@ public class MainActivity extends Activity {
     private static final String DISCLOSURE_PREF = "accessibility_disclosure_v1";
 
     private Prefs prefs;
+    private HealthDiagnostics health;
     private LinearLayout pageHost;
     private TextView tabRadar;
     private TextView tabHistory;
@@ -73,6 +74,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = new Prefs(this);
+        health = new HealthDiagnostics(this);
         setupWindow();
         buildShell();
         requestNotificationPermissionIfNeeded();
@@ -291,10 +293,19 @@ public class MainActivity extends Activity {
         if (!ShizukuBridge.permissionGranted()) return "等待 Shizuku 授權";
         int id = prefs.virtualDisplayId();
         if (!prefs.virtualDisplayRunning() || id < 0) return "正在建立第二螢幕";
-        if (prefs.secondaryLineDisplayId() == id && System.currentTimeMillis() - prefs.secondaryLineSeenAt() <= 15000L) {
-            return "✓ Display " + id + " · LINE 已驗證 · 主畫面可自由使用";
+
+        long now = System.currentTimeMillis();
+        boolean lineOk = prefs.secondaryLineDisplayId() == id
+            && now - prefs.secondaryLineSeenAt() <= 15000L;
+        boolean targetOk = health.isTargetRecent(slot.index, id, now, prefs);
+
+        if (lineOk && targetOk) {
+            return "✓ Display " + id + " · 目標聊天室已定位 · 背景監控中";
         }
-        return "Display " + id + " 已建立 · 等待 LINE 驗證";
+        if (lineOk) {
+            return "Display " + id + " · LINE 已驗證 · 正在定位「" + slot.name + "」";
+        }
+        return "Display " + id + " 已建立 · 等待 LINE／自動尋路";
     }
 
     private String lastCheckedText(long at) {
@@ -350,6 +361,8 @@ public class MainActivity extends Activity {
         boolean lineOk = displayOk && prefs.secondaryLineDisplayId() == prefs.virtualDisplayId()
             && System.currentTimeMillis() - prefs.secondaryLineSeenAt() <= 15000L;
         environment.addView(statusLine(lineOk, "LINE 第二螢幕驗證", lineOk ? "已驗證" : "尚未驗證"));
+        boolean targetOk = displayOk && health.hasRecentBackgroundTarget(prefs, prefs.virtualDisplayId(), System.currentTimeMillis());
+        environment.addView(statusLine(targetOk, "監控聊天室定位", targetOk ? "已定位 · 背景監控就緒" : "尚未定位到啟用中的監控聊天室"));
         Button lab = quietButton("開啟進階診斷");
         lab.setOnClickListener(v -> startActivity(new Intent(this, ExperimentalLabActivity.class)));
         environment.addView(lab, marginLp(0, 10, 0, 0));
@@ -618,8 +631,9 @@ public class MainActivity extends Activity {
                 "Radar 會自動：\n" +
                 "1. 建立第二螢幕\n" +
                 "2. 用 Shizuku 把 LINE 放進第二 Display\n" +
-                "3. 用 Accessibility 驗證 LINE 是否真的在第二螢幕\n\n" +
-                "只有看到「LINE 已驗證」才算背景模式真正成功。"
+                "3. 驗證 LINE root\n" +
+                "4. 自動復位到聊天列表並定位「" + slot.name + "」\n\n" +
+                "只有人物卡顯示「目標聊天室已定位」才算背景監控真正就緒。看到 LINE 已驗證但還在『正在定位』時，Radar 仍會自動尋路。"
             )
             .setPositiveButton("知道了", null)
             .show();
