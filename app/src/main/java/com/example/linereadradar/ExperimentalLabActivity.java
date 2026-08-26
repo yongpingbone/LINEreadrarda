@@ -77,7 +77,7 @@ public class ExperimentalLabActivity extends Activity {
         long now = System.currentTimeMillis();
 
         body.addView(text("Radar Lab ✦", 25, true, TEXT));
-        TextView intro = text("這裡是進階診斷頁。背景監控拆成 Display、LINE root、目標聊天室三層；只有第③層真的定位到啟用中的聊天室，才算背景監控就緒。", 13, false, MUTED);
+        TextView intro = text("這裡是進階診斷頁。背景監控拆成 Display、LINE root、目標聊天室三層；No-Read 另有 Focus Shield 實驗 gate。只有第③層真的定位到啟用中的聊天室，而且 Shield 實際取得焦點時，才可進行 No-Read 真機驗收。", 13, false, MUTED);
         intro.setPadding(0, dp(5), 0, dp(15));
         body.addView(intro);
 
@@ -104,12 +104,14 @@ public class ExperimentalLabActivity extends Activity {
         ));
 
         int targetCount = 0;
+        boolean anyTargetOk = false;
         for (int i = 0; i < Prefs.MAX_SLOTS; i++) {
             Prefs.Slot slot = prefs.slot(i);
             if (!slot.backgroundActive()) continue;
             targetCount++;
             long targetAt = health.targetChatSeenAt(i);
             boolean targetOk = displayOk && health.isTargetRecent(i, displayId, now, prefs);
+            anyTargetOk |= targetOk;
             status.addView(statusLine(
                 targetOk,
                 "③ 目標聊天室 · " + slot.name,
@@ -123,9 +125,51 @@ public class ExperimentalLabActivity extends Activity {
         }
         body.addView(status, margin(0, 0, 0, 12));
 
+        LinearLayout shield = card();
+        shield.addView(text("Focus Shield · No-Read 實驗", 18, true, TEXT));
+        boolean shieldAlive = displayId > 0 && NoReadShieldActivity.isAliveOnDisplay(displayId);
+        boolean shieldProtecting = displayId > 0 && NoReadShieldActivity.isProtectingOnDisplay(displayId);
+        long shieldAt = health.shieldStateAt();
+        boolean shieldFresh = shieldAt > 0L && now - shieldAt <= 5000L;
+        boolean shieldDisplayOk = health.shieldDisplayId() == displayId && displayId > 0;
+        boolean lineWhileShield = shieldProtecting && lineOk;
+        boolean targetWhileShield = shieldProtecting && anyTargetOk;
+
+        shield.addView(statusLine(shieldAlive, "Shield alive",
+            shieldAlive ? "Activity 存活" : "Shield Activity 不在目前第二 Display"));
+        shield.addView(statusLine(shieldDisplayOk, "Shield display",
+            health.shieldDisplayId() > 0 ? "Display " + health.shieldDisplayId() : "尚未回報 Display"));
+        shield.addView(statusLine(health.shieldResumed(), "Shield resumed",
+            "resumed=" + health.shieldResumed() + " · top-resumed=" + health.shieldTopResumed()));
+        shield.addView(statusLine(health.shieldWindowFocused(), "Shield window focus",
+            "focus=" + health.shieldWindowFocused() + " · 保護判定=" + shieldProtecting));
+        shield.addView(statusLine(shieldFresh, "Shield heartbeat",
+            shieldAt > 0 ? formatAt(shieldAt) + " · " + ageText(now, shieldAt) + " · " + health.shieldEvent() : "尚未收到 Shield 狀態"));
+        shield.addView(statusLine(lineWhileShield, "LINE root visible while shield active",
+            shieldProtecting ? (lineOk ? "PASS · Shield 上層時仍看得到 LINE" : "FAIL · Shield 上層後 LINE root 消失") : "等待 Shield 真正取得焦點"));
+        shield.addView(statusLine(targetWhileShield, "Target chat visible while shield active",
+            shieldProtecting ? (anyTargetOk ? "PASS · 第③層仍維持" : "FAIL · Shield 上層後目標聊天室停止回報") : "等待 Shield 真正取得焦點"));
+
+        long latestTreeAt = 0L;
+        for (int i = 0; i < Prefs.MAX_SLOTS; i++) {
+            Prefs.Slot slot = prefs.slot(i);
+            if (!slot.backgroundActive()) continue;
+            latestTreeAt = Math.max(latestTreeAt, health.lastTreeSignatureChangeAt(i));
+        }
+        boolean treeChangingWhileShield = shieldProtecting && latestTreeAt >= health.shieldActiveSinceAt();
+        shield.addView(statusLine(treeChangingWhileShield, "Tree changes while shield active",
+            latestTreeAt > 0
+                ? "最後變化 " + formatAt(latestTreeAt) + " · Shield 保護起點 " + formatAt(health.shieldActiveSinceAt())
+                : "尚未記錄 tree signature 變化"));
+        shield.addView(text(
+            "No-Read 真機驗收只有在 Shield protecting + LINE root 可見 + 第③層維持的前提下才有意義。若 Shield 取得焦點後 LINE tree 不再更新，這條路直接判 FAIL，不把它包裝成成功。",
+            12, false, MUTED));
+        body.addView(shield, margin(0, 0, 0, 12));
+
         LinearLayout diagnostics = card();
         diagnostics.addView(text("故障時間軸", 18, true, TEXT));
-        diagnostics.addView(text("下次漏抓時直接比對下面時間，不再猜 Samsung / Accessibility 哪一層先停。", 12, false, MUTED));
+        diagnostics.addView(text("下次漏抓或自動已讀時直接比對下面時間，不再猜 Samsung / Accessibility / Focus 哪一層先停。", 12, false, MUTED));
+        diagnostics.addView(diagnosticLine("last shield heartbeat", health.shieldStateAt(), now));
         diagnostics.addView(diagnosticLine("last pulse success", health.lastPulseSuccessAt(), now));
         diagnostics.addView(diagnosticLine("last LINE root seen", prefs.secondaryLineSeenAt(), now));
         for (int i = 0; i < Prefs.MAX_SLOTS; i++) {
@@ -157,11 +201,11 @@ public class ExperimentalLabActivity extends Activity {
         LinearLayout recovery = card();
         recovery.addView(text("自我修復 gate", 18, true, TEXT));
         recovery.addView(text(
-            "heartbeat 與 hard refresh 現在只看：\n" +
+            "初次定位階段可使用 heartbeat / hard refresh：\n" +
             "✓ Display 還活著\n" +
             "✓ Shizuku 已連線並授權\n" +
             "✓ 至少一個背景監控對象仍啟用\n\n" +
-            "不要求 Accessibility 必須先回報 LINE root。第②層斷掉時，救援仍會繼續。v0.6.9 起 Accessibility 只負責辨識節點與座標；真正的 tap / swipe / BACK 由 Shizuku 直接送到指定第二 Display，不再受 isVisibleToUser 限制。",
+            "一旦第③層曾成功定位，No-Read 模式改成 fail-closed：優先維持 Focus Shield，不再為了恢復監控反覆把 LINE 喚到前景，避免 Radar 自己製造已讀。",
             12, false, MUTED));
         body.addView(recovery, margin(0, 0, 0, 12));
 
@@ -223,11 +267,11 @@ public class ExperimentalLabActivity extends Activity {
         LinearLayout success = card();
         success.addView(text("什麼才算背景模式成功？", 18, true, TEXT));
         success.addView(text(
-            "要分三層看：\n" +
+            "背景監控仍分三層：\n" +
             "① Display alive：第二 Display 本身存在\n" +
             "② LINE root visible：Accessibility 還看得到第二 Display 的 LINE\n" +
             "③ Target chat updating：Radar 真的持續掃得到指定聊天室\n\n" +
-            "只有①＋②＋③都成立，才會顯示『背景監控就緒』。",
+            "No-Read 再多一個獨立驗收：Focus Shield 必須真的 resumed + focused，而且 ②③ 不能因此消失。",
             13, false, MUTED));
         body.addView(success, margin(0, 0, 0, 12));
 
@@ -235,13 +279,15 @@ public class ExperimentalLabActivity extends Activity {
         screenOff.addView(text("息屏測試", 18, true, TEXT));
         screenOff.addView(text(
             "v0.6 已移除 MediaProjection 依賴，改成 Shizuku + Virtual Display。\n\n" +
-            "息屏後若漏抓，先不要手動打開 LINE。直接進 Radar Lab 截圖『故障時間軸』，就能判斷是 pulse 還活著但 LINE root 斷了、LINE root 還活著但目標聊天室不再更新，或整個 Display/Shizuku 已停止。",
+            "P0 No-Read 真機驗證完成前，不把息屏成功當成已證明。息屏後若漏抓，先不要手動打開 LINE，直接進 Radar Lab 截圖健康狀態與故障時間軸。",
             12, false, MUTED));
         body.addView(screenOff, margin(0, 0, 0, 12));
 
         LinearLayout readProtection = card();
         readProtection.addView(text("No-Read 保護", 18, true, TEXT));
-        readProtection.addView(text("No-Read 與 Shizuku 第二螢幕是不同層。已確認有效的 No-Read 行為維持不變；這次只調整第二 Display 的尋路、恢復與就緒判定。", 12, false, MUTED));
+        readProtection.addView(text(
+            "目前正式免 Root 路徑是 Focus Shield prototype，不把 Xposed / LSPosed 當產品依賴。Shield 的目的不是攔截 LINE 內部函式，而是讓 LINE 留在第二 Display 下層 render，同時由 Radar 取得該 Display 的前景焦點。是否真的阻止 LINE read receipt，只能以真機對方端『未出現已讀』驗收。",
+            12, false, MUTED));
         body.addView(readProtection, margin(0, 0, 0, 12));
 
         LinearLayout saveCard = card();
