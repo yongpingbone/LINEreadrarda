@@ -37,12 +37,13 @@ public class LineReadAccessibilityService extends AccessibilityService {
     static final String ACTION_BASELINE = "com.example.linereadradar.BASELINE";
 
     private static final String LINE_PACKAGE = "jp.naver.line.android";
-    private static final String CHANNEL_ID = "line_read_radar_events_v060";
+    private static final String CHANNEL_ID = "line_read_radar_events_v061";
     private static final long DEBOUNCE_MS = 250L;
     private static final long WATCHDOG_MS = 700L;
     private static final long REQUEST_TIMEOUT_MS = 15000L;
     private static final long MANUAL_SESSION_GAP_MS = 1600L;
     private static final long MANUAL_STABLE_MS = 1000L;
+    private static final long SECONDARY_DIAGNOSTIC_MS = 1500L;
     private static final Pattern TIME_LIKE = Pattern.compile(
         "^(上午|下午|AM|PM|am|pm)?\\s*\\d{1,2}:\\d{2}$|^\\d{1,2}/\\d{1,2}$|^昨天$|^今天$|^Yesterday$|^Today$|^昨日$|^今日$|^어제$|^오늘$"
     );
@@ -59,6 +60,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
 
     private Prefs prefs;
     private long lastScanAt = 0L;
+    private long lastSecondaryDiagnosticAt = 0L;
     private int requestedSlot = -1;
     private long requestStartedAt = 0L;
     private boolean clickedTargetDuringRequest = false;
@@ -379,20 +381,28 @@ public class LineReadAccessibilityService extends AccessibilityService {
         int maxReadBottom = -1;
         List<MessageToken> incoming = new ArrayList<>();
 
+        int preferredDisplayId = prefs.virtualDisplayRunning() ? prefs.virtualDisplayId() : -1;
+        boolean preferredDisplayReported = false;
+        boolean lineOnPreferredDisplay = false;
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             SparseArray<List<AccessibilityWindowInfo>> all = getWindowsOnAllDisplays();
             if (all != null) {
                 for (int displayIndex = 0; displayIndex < all.size(); displayIndex++) {
                     int displayId = all.keyAt(displayIndex);
                     List<AccessibilityWindowInfo> windows = all.valueAt(displayIndex);
+                    if (displayId == preferredDisplayId) preferredDisplayReported = true;
                     if (windows == null) continue;
                     for (AccessibilityWindowInfo window : windows) {
                         if (window == null) continue;
                         AccessibilityNodeInfo root = window.getRoot();
                         if (!isLineRoot(root)) continue;
                         sawLineWindow = true;
-                        if (prefs.virtualDisplayRunning() && displayId == prefs.virtualDisplayId()) {
+                        if (displayId == preferredDisplayId && preferredDisplayId >= 0) {
+                            lineOnPreferredDisplay = true;
                             prefs.markSecondaryLineSeen(displayId, System.currentTimeMillis());
+                            prefs.updateVirtualDisplayStatus(
+                                "Display " + displayId + " · Accessibility 已看到 LINE · 驗證完成");
                         }
                         ScanResult result = scanTree(root, target);
                         if (!result.targetVisible) continue;
@@ -417,6 +427,20 @@ public class LineReadAccessibilityService extends AccessibilityService {
                     readCount += result.readCount;
                     maxReadBottom = Math.max(maxReadBottom, result.maxReadBottom);
                     incoming.addAll(result.incomingTokens);
+                }
+            }
+        }
+
+        if (preferredDisplayId >= 0 && !lineOnPreferredDisplay) {
+            long now = System.currentTimeMillis();
+            if (now - lastSecondaryDiagnosticAt >= SECONDARY_DIAGNOSTIC_MS) {
+                lastSecondaryDiagnosticAt = now;
+                if (preferredDisplayReported) {
+                    prefs.updateVirtualDisplayStatus(
+                        "Display " + preferredDisplayId + " 已被 Accessibility 看見 · 目前沒有 LINE window");
+                } else {
+                    prefs.updateVirtualDisplayStatus(
+                        "Display " + preferredDisplayId + " 已建立 · Accessibility 尚未回報這個 Display");
                 }
             }
         }
