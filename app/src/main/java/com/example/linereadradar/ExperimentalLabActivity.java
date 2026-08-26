@@ -142,6 +142,16 @@ public class ExperimentalLabActivity extends Activity {
             ));
         }
         diagnostics.addView(diagnosticLine("last hard refresh", health.lastHardRefreshAt(), now));
+        String navAction = health.lastNavigationAction();
+        String navLabel = navAction.isEmpty()
+            ? "last navigation action"
+            : "last navigation action · " + navAction + (health.lastNavigationSuccess() ? " ✓" : " ✕");
+        diagnostics.addView(diagnosticLine(navLabel, health.lastNavigationAt(), now));
+        if (health.lastNavigationAt() > 0L && !health.lastNavigationDetail().isEmpty()) {
+            diagnostics.addView(text(
+                "Display " + health.lastNavigationDisplayId() + " · " + health.lastNavigationDetail(),
+                10, false, health.lastNavigationSuccess() ? MUTED : AMBER));
+        }
         body.addView(diagnostics, margin(0, 0, 0, 12));
 
         LinearLayout recovery = card();
@@ -151,7 +161,7 @@ public class ExperimentalLabActivity extends Activity {
             "✓ Display 還活著\n" +
             "✓ Shizuku 已連線並授權\n" +
             "✓ 至少一個背景監控對象仍啟用\n\n" +
-            "不要求 Accessibility 必須先回報 LINE root。第②層斷掉時，救援仍會繼續。hard refresh 找不到目標時，會先退出目前 LINE 頁面、回到聊天分頁，再有限次掃描聊天列表。",
+            "不要求 Accessibility 必須先回報 LINE root。第②層斷掉時，救援仍會繼續。v0.6.9 起 Accessibility 只負責辨識節點與座標；真正的 tap / swipe / BACK 由 Shizuku 直接送到指定第二 Display，不再受 isVisibleToUser 限制。",
             12, false, MUTED));
         body.addView(recovery, margin(0, 0, 0, 12));
 
