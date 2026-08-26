@@ -139,9 +139,6 @@ public class ProjectionForegroundService extends Service {
 
             int id = remote.displayId;
 
-            // Recovery actions are intentionally gated by Display/Shizuku/background
-            // health, not by Accessibility. Their purpose is to recover when
-            // Accessibility has stopped seeing LINE.
             if (shouldRunRecovery(id)) {
                 pulseLineTask(id);
                 maybeHardRefreshMonitoredChat(id);
@@ -364,10 +361,6 @@ public class ProjectionForegroundService extends Service {
         lineLaunchInProgress = false;
         linePulseInProgress = false;
         secondaryPollInProgress = false;
-
-        // Deliberately DO NOT release the Shizuku-owned Virtual Display here.
-        // Android may recreate this foreground service while the phone is locked.
-        // The display must survive independently in the daemon UserService.
         releaseWakeLock();
         super.onDestroy();
     }
@@ -455,7 +448,6 @@ public class ProjectionForegroundService extends Service {
             .setContentIntent(pi)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
-            .setSilent(true)
             .setShowWhen(false)
             .setCategory(Notification.CATEGORY_SERVICE)
             .setVisibility(Notification.VISIBILITY_PRIVATE)
