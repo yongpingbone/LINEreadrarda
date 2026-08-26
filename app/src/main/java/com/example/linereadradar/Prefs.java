@@ -278,6 +278,10 @@ final class Prefs {
             .apply();
     }
 
+    void updateVirtualDisplayStatus(String status) {
+        p.edit().putString(K_VD_STATUS, status == null ? "第二畫面運作中" : status).apply();
+    }
+
     void setVirtualDisplayStopped(String reason) {
         p.edit()
             .putBoolean(K_VD_RUNNING, false)
