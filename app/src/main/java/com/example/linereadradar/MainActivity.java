@@ -128,7 +128,12 @@ public class MainActivity extends Activity {
         else renderSettings();
     }
 
+    private void resetPageForDirectRender() {
+        if (pageHost != null) pageHost.removeAllViews();
+    }
+
     private void renderRadar() {
+        resetPageForDirectRender();
         LinearLayout heading = row();
         TextView title = text("監控對象", 21, true, TEXT);
         heading.addView(title, new LinearLayout.LayoutParams(0, dp(44), 1f));
@@ -236,6 +241,7 @@ public class MainActivity extends Activity {
     }
 
     private void renderHistory() {
+        resetPageForDirectRender();
         pageHost.addView(text("事件紀錄", 22, true, TEXT), marginLp(4, 8, 0, 2));
         pageHost.addView(text("訊息正文只有在該人物的「保存訊息內容」開啟時才會永久寫入。", 13, false, MUTED), marginLp(4, 0, 0, 12));
 
@@ -270,6 +276,7 @@ public class MainActivity extends Activity {
     }
 
     private void renderSettings() {
+        resetPageForDirectRender();
         pageHost.addView(text("設定", 22, true, TEXT), marginLp(4, 8, 0, 12));
 
         if (prefs.count() > 0) {
