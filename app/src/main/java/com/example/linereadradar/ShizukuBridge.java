@@ -17,6 +17,7 @@ import rikka.shizuku.Shizuku;
 final class ShizukuBridge {
     static final int REQUEST_CODE = 6206;
     static final String SHIZUKU_PACKAGE = "moe.shizuku.privileged.api";
+    private static final String LINE_PACKAGE = "jp.naver.line.android";
 
     interface ResultCallback {
         void onResult(Result result);
@@ -24,12 +25,13 @@ final class ShizukuBridge {
 
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static final Object LOCK = new Object();
-    private static final Queue<PendingCommand> PENDING = new ArrayDeque<>();
+    private static final Queue<PendingLaunch> PENDING = new ArrayDeque<>();
     private static IRadarShellService shellService;
     private static boolean binding;
 
     private static final Shizuku.UserServiceArgs USER_SERVICE_ARGS =
-        new Shizuku.UserServiceArgs(new ComponentName(BuildConfig.APPLICATION_ID, RadarShellUserService.class.getName()))
+        new Shizuku.UserServiceArgs(
+            new ComponentName(BuildConfig.APPLICATION_ID, RadarShellUserService.class.getName()))
             .daemon(true)
             .processNameSuffix("radar_shell")
             .debuggable(BuildConfig.DEBUG)
@@ -118,28 +120,33 @@ final class ShizukuBridge {
             post(callback, Result.fail("Shizuku 尚未取得授權"));
             return;
         }
-        Intent launch = context.getPackageManager().getLaunchIntentForPackage("jp.naver.line.android");
+        if (displayId <= 0) {
+            post(callback, Result.fail("無效的第二 Display"));
+            return;
+        }
+
+        Intent launch = context.getPackageManager().getLaunchIntentForPackage(LINE_PACKAGE);
         if (launch == null || launch.getComponent() == null) {
             post(callback, Result.fail("找不到 LINE 啟動 Activity"));
             return;
         }
-        String flattened = launch.getComponent().flattenToShortString();
-        String command = "am start --user 0 --display " + displayId + " -n " + shellQuote(flattened);
-        runAsync(command, callback);
+
+        PendingLaunch request = new PendingLaunch(
+            LINE_PACKAGE,
+            launch.getComponent().flattenToShortString(),
+            displayId,
+            callback
+        );
+        submit(request);
     }
 
-    static void runAsync(String command, ResultCallback callback) {
-        if (!permissionGranted()) {
-            post(callback, Result.fail("Shizuku 尚未取得授權"));
-            return;
-        }
-
+    private static void submit(PendingLaunch request) {
         IRadarShellService service;
         synchronized (LOCK) {
             service = shellService;
             if (service == null || !service.asBinder().isBinderAlive()) {
                 shellService = null;
-                PENDING.add(new PendingCommand(command, callback));
+                PENDING.add(request);
                 if (!binding) {
                     binding = true;
                     try {
@@ -152,12 +159,12 @@ final class ShizukuBridge {
                 return;
             }
         }
-        executeOnWorker(service, command, callback);
+        executeOnWorker(service, request);
     }
 
     private static void drainPending() {
         while (true) {
-            PendingCommand pending;
+            PendingLaunch pending;
             IRadarShellService service;
             synchronized (LOCK) {
                 service = shellService;
@@ -168,35 +175,39 @@ final class ShizukuBridge {
                 post(pending.callback, Result.fail("Shizuku UserService 連線失敗"));
                 continue;
             }
-            executeOnWorker(service, pending.command, pending.callback);
+            executeOnWorker(service, pending);
         }
     }
 
-    private static void executeOnWorker(IRadarShellService service, String command, ResultCallback callback) {
+    private static void executeOnWorker(IRadarShellService service, PendingLaunch request) {
         new Thread(() -> {
             try {
-                String raw = service.execute(command);
-                post(callback, parse(raw));
+                String raw = service.startActivityOnDisplay(
+                    request.packageName,
+                    request.componentName,
+                    request.displayId
+                );
+                post(request.callback, parse(raw));
             } catch (Throwable t) {
                 synchronized (LOCK) { shellService = null; }
-                post(callback, Result.fail(t.getClass().getSimpleName() + ": " + safe(t.getMessage())));
+                post(request.callback,
+                    Result.fail(t.getClass().getSimpleName() + ": " + safe(t.getMessage())));
             }
-        }, "RadarShizukuCommand").start();
+        }, "RadarShizukuLaunch").start();
     }
 
     private static Result parse(String raw) {
         if (raw == null) return Result.fail("Shizuku UserService 沒有回傳結果");
         if (raw.startsWith("OK")) {
             String detail = raw.length() > 2 ? raw.substring(2).trim() : "";
-            return Result.ok(detail.isEmpty() ? "shell command completed" : detail);
+            return Result.ok(detail.isEmpty() ? "LINE launch completed" : detail);
         }
-        String detail = raw.startsWith("ERR:") ? raw.substring(4).trim() : raw.trim();
-        return Result.fail(detail.isEmpty() ? "shell command failed" : detail);
+        return Result.fail(raw.trim().isEmpty() ? "LINE launch failed" : raw.trim());
     }
 
     private static void failPending(String message) {
         while (true) {
-            PendingCommand pending;
+            PendingLaunch pending;
             synchronized (LOCK) { pending = PENDING.poll(); }
             if (pending == null) return;
             post(pending.callback, Result.fail(message));
@@ -208,19 +219,21 @@ final class ShizukuBridge {
         MAIN.post(() -> callback.onResult(result));
     }
 
-    private static String shellQuote(String value) {
-        return "'" + value.replace("'", "'\\''") + "'";
-    }
-
     private static String safe(String value) {
         return value == null || value.trim().isEmpty() ? "unknown error" : value.trim();
     }
 
-    private static final class PendingCommand {
-        final String command;
+    private static final class PendingLaunch {
+        final String packageName;
+        final String componentName;
+        final int displayId;
         final ResultCallback callback;
-        PendingCommand(String command, ResultCallback callback) {
-            this.command = command;
+
+        PendingLaunch(String packageName, String componentName, int displayId,
+                      ResultCallback callback) {
+            this.packageName = packageName;
+            this.componentName = componentName;
+            this.displayId = displayId;
             this.callback = callback;
         }
     }
