@@ -39,8 +39,10 @@ final class VirtualDisplayEngine {
             DisplayManager dm = (DisplayManager) context.getSystemService(Context.DISPLAY_SERVICE);
             if (dm == null) return failAndRelease("DisplayManager unavailable");
 
-            int flags = DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
+            int flags = DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC
+                | DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
                 | DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION;
+
             virtualDisplay = dm.createVirtualDisplay(
                 "LINE-Radar-Shizuku",
                 width,
