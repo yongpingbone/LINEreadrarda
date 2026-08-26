@@ -37,7 +37,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
     static final String ACTION_BASELINE = "com.example.linereadradar.BASELINE";
 
     private static final String LINE_PACKAGE = "jp.naver.line.android";
-    private static final String CHANNEL_ID = "line_read_radar_events_v061";
+    private static final String CHANNEL_ID = "line_read_radar_events_v065";
     private static final long DEBOUNCE_MS = 250L;
     private static final long WATCHDOG_MS = 700L;
     private static final long REQUEST_TIMEOUT_MS = 15000L;
@@ -45,7 +45,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
     private static final long MANUAL_STABLE_MS = 1000L;
     private static final long SECONDARY_DIAGNOSTIC_MS = 1500L;
     private static final Pattern TIME_LIKE = Pattern.compile(
-        "^(上午|下午|AM|PM|am|pm)?\\s*\\d{1,2}:\\d{2}$|^\\d{1,2}/\\d{1,2}$|^昨天$|^今天$|^Yesterday$|^Today$|^昨日$|^今日$|^어제$|^오늘$"
+        "^(上午|下午|AM|PM|am|pm|오전|오후)?\\s*\\d{1,2}:\\d{2}$|^\\d{1,2}/\\d{1,2}$|^昨天$|^今天$|^Yesterday$|^Today$|^昨日$|^今日$|^어제$|^오늘$"
     );
 
     private static final Set<String> READ_LABELS = setOf(
@@ -270,9 +270,6 @@ public class LineReadAccessibilityService extends AccessibilityService {
                 return;
             }
 
-            // A verified background slot on the Virtual Display is a continuous
-            // monitor, not a user manually re-entering the chat. Never reset its
-            // baseline merely because the Accessibility window disappeared briefly.
             if (secondaryMode) {
                 manualVisibleSlot = -1;
                 manualVisibleSince = 0L;
@@ -316,22 +313,33 @@ public class LineReadAccessibilityService extends AccessibilityService {
         }
 
         boolean eventFired = false;
+        boolean detectorRebased = false;
+
         if (slot.readEnabled) {
-            ReadDetector.Snapshot baseline = new ReadDetector.Snapshot(slot.baseCount, slot.baseMaxY);
-            ReadDetector.Snapshot current = new ReadDetector.Snapshot(scan.readCount, scan.maxReadBottom);
-            int thresholdPx = Math.max(24, (int) (48 * getResources().getDisplayMetrics().density));
-            if (ReadDetector.isNewRead(baseline, current, thresholdPx)) {
-                String interval = slot.lastUnreadSeenAt > 0
-                    ? formatTime(slot.lastUnreadSeenAt) + "～" + formatTime(now)
-                    : "未知～" + formatTime(now);
-                prefs.appendHistory(formatDateTime(now) + "｜" + slot.name + "｜✦ 已讀｜可能區間 " + interval);
-                if (slot.notifyEnabled) {
-                    notifyEvent(slot, "✦ " + slot.name + " 已讀了", "首次確認 " + formatTime(now) + " · 可能區間 " + interval, 100 + slot.index);
-                }
-                prefs.updateReadBaseline(slot.index, scan.readCount, scan.maxReadBottom, now);
-                eventFired = true;
+            if (prefs.needsReadDetectorRebaseline(slot.index)) {
+                prefs.rebaselineReadDetector(slot.index, scan.readCount, scan.maxReadBottom, now);
+                detectorRebased = true;
             } else {
-                prefs.markUnreadSeen(slot.index, now);
+                ReadDetector.Snapshot baseline = new ReadDetector.Snapshot(slot.baseCount, slot.baseMaxY);
+                ReadDetector.Snapshot current = new ReadDetector.Snapshot(scan.readCount, scan.maxReadBottom);
+                float density = getResources().getDisplayMetrics().density;
+                int thresholdPx = isSecondaryBackgroundMode(slot)
+                    ? Math.max(6, (int) (6 * density))
+                    : Math.max(24, (int) (36 * density));
+
+                if (ReadDetector.isNewRead(baseline, current, thresholdPx)) {
+                    String interval = slot.lastUnreadSeenAt > 0
+                        ? formatTime(slot.lastUnreadSeenAt) + "～" + formatTime(now)
+                        : "未知～" + formatTime(now);
+                    prefs.appendHistory(formatDateTime(now) + "｜" + slot.name + "｜✦ 已讀｜可能區間 " + interval);
+                    if (slot.notifyEnabled) {
+                        notifyEvent(slot, "✦ " + slot.name + " 已讀了", "首次確認 " + formatTime(now) + " · 可能區間 " + interval, 100 + slot.index);
+                    }
+                    prefs.updateReadBaseline(slot.index, scan.readCount, scan.maxReadBottom, now);
+                    eventFired = true;
+                } else {
+                    prefs.markUnreadSeen(slot.index, now);
+                }
             }
         }
 
@@ -353,10 +361,10 @@ public class LineReadAccessibilityService extends AccessibilityService {
             prefs.updateIncomingSignature(slot.index, scan.incomingSignature, now);
         }
 
-        // Do not continuously rewrite the read baseline on an ordinary no-event
-        // scan. LINE recycles Accessibility rows; saving a transient layout as the
-        // new baseline can swallow the real read transition on the next scan.
-        prefs.markChecked(slot.index, now, eventFired ? "剛偵測到更新" : "監控中");
+        String status = eventFired
+            ? "剛偵測到更新"
+            : detectorRebased ? "已讀偵測器已重新校準 · 監控中" : "監控中";
+        prefs.markChecked(slot.index, now, status);
         prefs.setGlobalStatus("剛檢查「" + slot.name + "」");
 
         if (automatedPoll) clearRequest(false);
@@ -435,9 +443,6 @@ public class LineReadAccessibilityService extends AccessibilityService {
                                 "Display " + displayId + " · Accessibility 已看到 LINE · 驗證完成");
                         }
 
-                        // Background monitoring must only consume the LINE instance on
-                        // the second Display. A LINE window opened by the user on the
-                        // main screen must not contaminate counts or message tokens.
                         if (preferSecondary && preferredDisplayId >= 0 && !onPreferred) continue;
 
                         sawAcceptedLineWindow = true;
@@ -482,8 +487,6 @@ public class LineReadAccessibilityService extends AccessibilityService {
             }
         }
 
-        // Never fall back to the main-screen LINE window while a background slot is
-        // explicitly tied to the verified secondary Display.
         if (!sawAcceptedLineWindow && !preferSecondary) {
             AccessibilityNodeInfo root = getRootInActiveWindow();
             if (isLineRoot(root)) {
@@ -513,6 +516,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
         root.getBoundsInScreen(rootBounds);
         int headerLimit = rootBounds.top + Math.max(1, (int) (rootBounds.height() * 0.25f));
         int leftMessageLimit = rootBounds.left + (int) (rootBounds.width() * 0.62f);
+        int readMarkerMinX = rootBounds.left + (int) (rootBounds.width() * 0.32f);
         int composerGuard = Math.max(72, (int) (rootBounds.height() * 0.10f));
         int messageBottomLimit = rootBounds.bottom - composerGuard;
         List<MessageToken> candidates = new ArrayList<>();
@@ -530,7 +534,10 @@ public class LineReadAccessibilityService extends AccessibilityService {
                 targetVisible = true;
             }
 
-            if (isReadLabel(text) || isReadLabel(desc)) {
+            boolean inReadArea = r.top > headerLimit
+                && r.bottom < messageBottomLimit
+                && r.centerX() > readMarkerMinX;
+            if (inReadArea && (isReadLabel(text) || isReadLabel(desc))) {
                 readCount++;
                 maxReadBottom = Math.max(maxReadBottom, r.bottom);
             }
@@ -618,9 +625,40 @@ public class LineReadAccessibilityService extends AccessibilityService {
 
     private boolean isReadLabel(String value) {
         String normalized = normalize(value);
+        if (normalized.isEmpty()) return false;
         if (READ_LABELS.contains(normalized)) return true;
+
+        if (containsDelimitedReadMarker(normalized, "已讀")) return true;
+        if (containsDelimitedReadMarker(normalized, "已读")) return true;
+        if (containsDelimitedReadMarker(normalized, "既読")) return true;
+        if (containsDelimitedReadMarker(normalized, "읽음")) return true;
+
         String lower = normalized.toLowerCase(Locale.ROOT);
-        return "read".equals(lower);
+        return containsDelimitedReadMarker(lower, "read");
+    }
+
+    private boolean containsDelimitedReadMarker(String value, String marker) {
+        if (value == null || marker == null || value.isEmpty() || marker.isEmpty()) return false;
+        int from = 0;
+        while (from < value.length()) {
+            int at = value.indexOf(marker, from);
+            if (at < 0) return false;
+            int end = at + marker.length();
+            boolean leftOk = at == 0 || isReadBoundary(value.charAt(at - 1));
+            boolean rightOk = end >= value.length()
+                || isReadBoundary(value.charAt(end))
+                || Character.isDigit(value.charAt(end));
+            if (leftOk && rightOk) return true;
+            from = at + 1;
+        }
+        return false;
+    }
+
+    private boolean isReadBoundary(char c) {
+        return Character.isWhitespace(c)
+            || c == ',' || c == '，' || c == '、'
+            || c == ':' || c == '：' || c == '·' || c == '•'
+            || c == '-' || c == '－' || c == '|' || c == '｜';
     }
 
     private boolean matchesTarget(String raw, String target) {
@@ -639,8 +677,12 @@ public class LineReadAccessibilityService extends AccessibilityService {
     private void ensureNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationManager nm = getSystemService(NotificationManager.class);
-            NotificationChannel channel = new NotificationChannel(CHANNEL_ID, "LINE Radar 事件提醒", NotificationManager.IMPORTANCE_HIGH);
-            channel.setDescription("已讀與聊天室新訊息提醒");
+            NotificationChannel channel = new NotificationChannel(
+                CHANNEL_ID,
+                "LINE Radar 已讀與訊息提醒",
+                NotificationManager.IMPORTANCE_HIGH
+            );
+            channel.setDescription("監控對象已讀與新訊息的重要提醒");
             nm.createNotificationChannel(channel);
         }
     }
@@ -662,6 +704,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
             .setStyle(new Notification.BigTextStyle().bigText(text))
             .setContentIntent(pi)
             .setAutoCancel(true)
+            .setCategory(Notification.CATEGORY_MESSAGE)
             .setVisibility(Notification.VISIBILITY_PRIVATE)
             .setPriority(Notification.PRIORITY_HIGH);
 
