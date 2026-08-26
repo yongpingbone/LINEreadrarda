@@ -16,8 +16,10 @@ import android.os.PowerManager;
 
 public class ProjectionForegroundService extends Service {
     private static final String ACTION_START = "com.example.linereadradar.START_SHIZUKU_DISPLAY";
-    private static final String CHANNEL_ID = "line_radar_shizuku_display_v068";
+    private static final String CHANNEL_ID = "line_radar_background_silent_v070";
+    private static final String DISCONNECT_CHANNEL_ID = "line_radar_disconnect_v070";
     private static final int NOTIFICATION_ID = 7355;
+    private static final int DISCONNECT_NOTIFICATION_ID = 7356;
     private static final long HEALTH_CHECK_MS = 2500L;
     private static final long LINE_RETRY_MS = 4500L;
     private static final long LINE_PULSE_MS = 2500L;
@@ -31,6 +33,8 @@ public class ProjectionForegroundService extends Service {
     private boolean lineLaunchInProgress = false;
     private boolean linePulseInProgress = false;
     private boolean secondaryPollInProgress = false;
+    private boolean sessionWasReady = false;
+    private boolean disconnectAlerted = false;
     private long lastLineLaunchAttemptAt = 0L;
     private long lastLinePulseAt = 0L;
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -40,6 +44,7 @@ public class ProjectionForegroundService extends Service {
         public void run() {
             if (!ShizukuBridge.binderReady()) {
                 VirtualDisplayEngine.setExternalStatus("Shizuku 已停止 · 背景與息屏監控暫停");
+                maybeAlertDisconnect("Shizuku 服務已中斷，背景監控暫停");
                 updateNotification();
                 handler.postDelayed(this, HEALTH_CHECK_MS);
                 return;
@@ -47,6 +52,7 @@ public class ProjectionForegroundService extends Service {
 
             if (!ShizukuBridge.permissionGranted()) {
                 VirtualDisplayEngine.setExternalStatus("等待 LINE Radar 的 Shizuku 授權");
+                maybeAlertDisconnect("Shizuku 授權失效，背景監控暫停");
                 updateNotification();
                 handler.postDelayed(this, HEALTH_CHECK_MS);
                 return;
@@ -79,7 +85,8 @@ public class ProjectionForegroundService extends Service {
         prefs = new Prefs(this);
         health = new HealthDiagnostics(this);
         VirtualDisplayEngine.attach(this);
-        ensureChannel();
+        ensureChannels();
+        restoreReadyState();
         acquireWakeLock();
     }
 
@@ -94,8 +101,10 @@ public class ProjectionForegroundService extends Service {
 
         if (!ShizukuBridge.binderReady()) {
             VirtualDisplayEngine.setExternalStatus("Shizuku 尚未啟動 · 請先用無線偵錯啟動 Shizuku");
+            maybeAlertDisconnect("Shizuku 服務已中斷，背景監控暫停");
         } else if (!ShizukuBridge.permissionGranted()) {
             VirtualDisplayEngine.setExternalStatus("Shizuku 已啟動 · 等待 Radar 授權");
+            maybeAlertDisconnect("Shizuku 授權失效，背景監控暫停");
         } else {
             reconcileRemoteDisplay();
         }
@@ -106,6 +115,16 @@ public class ProjectionForegroundService extends Service {
         return START_STICKY;
     }
 
+    private void restoreReadyState() {
+        int id = prefs.virtualDisplayId();
+        long now = System.currentTimeMillis();
+        sessionWasReady = id > 0
+            && prefs.virtualDisplayRunning()
+            && prefs.secondaryLineDisplayId() == id
+            && now - prefs.secondaryLineSeenAt() <= 15000L
+            && health.hasRecentBackgroundTarget(prefs, id, now);
+    }
+
     private void reconcileRemoteDisplay() {
         if (displaySetupInProgress || displayQueryInProgress) return;
         displayQueryInProgress = true;
@@ -113,6 +132,7 @@ public class ProjectionForegroundService extends Service {
         VirtualDisplayEngine.restore(this, remote -> {
             displayQueryInProgress = false;
             if (!remote.success || remote.displayId <= 0) {
+                maybeAlertDisconnect("第二螢幕已中斷，Radar 正在自動重建");
                 createDisplayAndLaunchLine();
                 return;
             }
@@ -131,14 +151,17 @@ public class ProjectionForegroundService extends Service {
             boolean targetReady = hasRecentTargetChat(id);
 
             if (lineVerified && targetReady) {
+                markMonitorHealthy();
                 prefs.updateVirtualDisplayStatus(
                     "Display " + id + " · 目標聊天室已定位 · 背景＋息屏監控就緒");
                 prefs.setGlobalStatus("背景＋息屏持續監控中 · Display " + id);
             } else if (lineVerified) {
+                maybeAlertDisconnect("目標聊天室已停止更新，Radar 正在重新定位");
                 prefs.updateVirtualDisplayStatus(
                     "Display " + id + " · LINE 已驗證 · 尚未定位到監控聊天室");
                 prefs.setGlobalStatus("LINE 已驗證 · 正在定位監控聊天室");
             } else {
+                maybeAlertDisconnect("LINE 第二螢幕已失聯超過 15 秒，Radar 正在自我修復");
                 prefs.updateVirtualDisplayStatus(
                     "Display " + id + " · LINE root 超過 15 秒未回報 · 自我修復中");
                 prefs.setGlobalStatus("第二畫面自我修復中 · Display " + id);
@@ -149,6 +172,42 @@ public class ProjectionForegroundService extends Service {
             }
             updateNotification();
         });
+    }
+
+    private void markMonitorHealthy() {
+        sessionWasReady = true;
+        disconnectAlerted = false;
+    }
+
+    private void maybeAlertDisconnect(String reason) {
+        if (!sessionWasReady || disconnectAlerted) return;
+        if (prefs == null || prefs.paused() || prefs.backgroundActiveCount() <= 0) return;
+        disconnectAlerted = true;
+
+        NotificationManager nm = getSystemService(NotificationManager.class);
+        if (nm == null) return;
+
+        Intent openApp = new Intent(this, MainActivity.class);
+        openApp.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) flags |= PendingIntent.FLAG_IMMUTABLE;
+        PendingIntent pi = PendingIntent.getActivity(this, 7356, openApp, flags);
+
+        Notification.Builder b = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+            ? new Notification.Builder(this, DISCONNECT_CHANNEL_ID)
+            : new Notification.Builder(this);
+
+        Notification n = b.setSmallIcon(R.drawable.ic_notify_chat_star)
+            .setContentTitle("LINE Radar · 監控中斷")
+            .setContentText(reason)
+            .setStyle(new Notification.BigTextStyle().bigText(reason))
+            .setContentIntent(pi)
+            .setAutoCancel(true)
+            .setCategory(Notification.CATEGORY_ERROR)
+            .setVisibility(Notification.VISIBILITY_PRIVATE)
+            .setPriority(Notification.PRIORITY_HIGH)
+            .build();
+        nm.notify(DISCONNECT_NOTIFICATION_ID, n);
     }
 
     private boolean shouldRunRecovery(int id) {
@@ -242,6 +301,7 @@ public class ProjectionForegroundService extends Service {
                 displaySetupInProgress = false;
                 prefs.setVirtualDisplayStopped(display.message);
                 prefs.setGlobalStatus("第二畫面建立失敗 · " + display.message);
+                maybeAlertDisconnect("第二螢幕建立失敗，背景監控已中斷");
                 updateNotification();
                 return;
             }
@@ -256,6 +316,7 @@ public class ProjectionForegroundService extends Service {
                 if (!launch.success) {
                     prefs.updateVirtualDisplayStatus(launch.message);
                     prefs.setGlobalStatus("第二畫面已建立 · LINE 尚未進入");
+                    maybeAlertDisconnect("LINE 無法回到第二螢幕，背景監控已中斷");
                     updateNotification();
                     return;
                 }
@@ -331,16 +392,31 @@ public class ProjectionForegroundService extends Service {
         wakeLock = null;
     }
 
-    private void ensureChannel() {
+    private void ensureChannels() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationManager nm = getSystemService(NotificationManager.class);
-            NotificationChannel channel = new NotificationChannel(
+            if (nm == null) return;
+
+            NotificationChannel silent = new NotificationChannel(
                 CHANNEL_ID,
-                "背景與息屏監控",
+                "背景監控狀態（靜默）",
                 NotificationManager.IMPORTANCE_MIN
             );
-            channel.setDescription("維持 Shizuku 第二 Display、LINE task heartbeat、聊天室尋路與重新對準");
-            nm.createNotificationChannel(channel);
+            silent.setDescription("Android 前景服務必要狀態；不彈出、不震動、不發聲");
+            silent.setSound(null, null);
+            silent.enableVibration(false);
+            silent.setShowBadge(false);
+            silent.setLockscreenVisibility(Notification.VISIBILITY_PRIVATE);
+            nm.createNotificationChannel(silent);
+
+            NotificationChannel disconnect = new NotificationChannel(
+                DISCONNECT_CHANNEL_ID,
+                "監控中斷提醒",
+                NotificationManager.IMPORTANCE_HIGH
+            );
+            disconnect.setDescription("只有背景監控真的中斷時才提醒");
+            disconnect.setLockscreenVisibility(Notification.VISIBILITY_PRIVATE);
+            nm.createNotificationChannel(disconnect);
         }
     }
 
@@ -373,15 +449,18 @@ public class ProjectionForegroundService extends Service {
             : new Notification.Builder(this);
 
         return b.setSmallIcon(R.drawable.ic_notify_chat_star)
-            .setContentTitle("LINE Radar · 背景＋息屏模式")
+            .setContentTitle("LINE Radar · 背景監控")
             .setContentText(text)
             .setStyle(new Notification.BigTextStyle().bigText(text))
             .setContentIntent(pi)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
+            .setSilent(true)
             .setShowWhen(false)
             .setCategory(Notification.CATEGORY_SERVICE)
             .setVisibility(Notification.VISIBILITY_PRIVATE)
+            .setPriority(Notification.PRIORITY_MIN)
+            .setLocalOnly(true)
             .build();
     }
 
