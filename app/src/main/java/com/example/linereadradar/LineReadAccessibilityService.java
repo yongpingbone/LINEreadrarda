@@ -37,7 +37,7 @@ public class LineReadAccessibilityService extends AccessibilityService {
     static final String ACTION_BASELINE = "com.example.linereadradar.BASELINE";
 
     private static final String LINE_PACKAGE = "jp.naver.line.android";
-    private static final String CHANNEL_ID = "line_read_radar_events_v056";
+    private static final String CHANNEL_ID = "line_read_radar_events_v057";
     private static final long DEBOUNCE_MS = 250L;
     private static final long WATCHDOG_MS = 700L;
     private static final long REQUEST_TIMEOUT_MS = 15000L;
@@ -80,7 +80,8 @@ public class LineReadAccessibilityService extends AccessibilityService {
                     else evaluateVisibleMonitoredChat(now);
                 }
             } catch (Throwable ignored) {
-                // Accessibility trees can disappear while LINE changes windows. Retry next tick.
+                // LINE can briefly replace its accessibility tree while changing screens.
+                // The next watchdog tick retries automatically.
             }
             handler.postDelayed(this, WATCHDOG_MS);
         }
@@ -95,8 +96,8 @@ public class LineReadAccessibilityService extends AccessibilityService {
             prefs.setGlobalStatus("尚未找到「" + slot.name + "」聊天室");
             Toast.makeText(this, "沒有找到「" + slot.name + "」聊天室，請再試一次", Toast.LENGTH_LONG).show();
         } else {
-            prefs.markChecked(requestedSlot, now, "背景檢查找不到聊天室");
-            prefs.setGlobalStatus("找不到「" + slot.name + "」，等待下次背景檢查");
+            prefs.markChecked(requestedSlot, now, "第二畫面尚未找到聊天室");
+            prefs.setGlobalStatus("第二畫面尚未找到「" + slot.name + "」");
         }
         clearRequest(false);
     };
@@ -186,16 +187,52 @@ public class LineReadAccessibilityService extends AccessibilityService {
             return;
         }
 
-        AccessibilityNodeInfo root = getRootInActiveWindow();
-        if (isLineRoot(root) && !clickedTargetDuringRequest) {
+        AccessibilityNodeInfo root = findLineRootForAutomation();
+        if (root != null && !clickedTargetDuringRequest) {
             if (clickTargetInTree(root, slot.name)) {
                 clickedTargetDuringRequest = true;
-                prefs.markChecked(slot.index, now, baselineRequest ? "正在開啟聊天室建立基準" : "背景檢查正在開啟聊天室");
+                prefs.markChecked(slot.index, now, baselineRequest
+                    ? "正在開啟聊天室建立基準"
+                    : "第二畫面正在開啟聊天室");
                 return;
             }
         }
 
         if (now - requestStartedAt > REQUEST_TIMEOUT_MS) timeoutRunnable.run();
+    }
+
+    private AccessibilityNodeInfo findLineRootForAutomation() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            SparseArray<List<AccessibilityWindowInfo>> all = getWindowsOnAllDisplays();
+            if (all != null) {
+                int preferredDisplay = VirtualDisplayEngine.displayId();
+                if (preferredDisplay >= 0) {
+                    List<AccessibilityWindowInfo> preferred = all.get(preferredDisplay);
+                    AccessibilityNodeInfo root = firstLineRoot(preferred);
+                    if (root != null) return root;
+                }
+
+                for (int i = 0; i < all.size(); i++) {
+                    int displayId = all.keyAt(i);
+                    if (displayId == 0) continue;
+                    AccessibilityNodeInfo root = firstLineRoot(all.valueAt(i));
+                    if (root != null) return root;
+                }
+            }
+        }
+
+        AccessibilityNodeInfo active = getRootInActiveWindow();
+        return isLineRoot(active) ? active : null;
+    }
+
+    private AccessibilityNodeInfo firstLineRoot(List<AccessibilityWindowInfo> windows) {
+        if (windows == null) return null;
+        for (AccessibilityWindowInfo window : windows) {
+            if (window == null) continue;
+            AccessibilityNodeInfo root = window.getRoot();
+            if (isLineRoot(root)) return root;
+        }
+        return null;
     }
 
     private void establishBaseline(Prefs.Slot slot, ScanResult scan, long now) {
@@ -230,8 +267,10 @@ public class LineReadAccessibilityService extends AccessibilityService {
             if (newVisibleSession) {
                 manualVisibleSlot = slot.index;
                 manualVisibleSince = now;
+                prefs.updateReadBaseline(slot.index, scan.readCount, scan.maxReadBottom, now);
+                prefs.updateIncomingSignature(slot.index, scan.incomingSignature, now);
+                prefs.markChecked(slot.index, now, "監控已對準聊天室");
                 prefs.setGlobalStatus("即時監控「" + slot.name + "」");
-                processSlot(slot, scan, now, false);
                 return;
             }
 
@@ -296,7 +335,8 @@ public class LineReadAccessibilityService extends AccessibilityService {
         }
         prefs.markChecked(slot.index, now, eventFired ? "剛偵測到更新" : "監控中");
         prefs.setGlobalStatus("剛檢查「" + slot.name + "」");
-        if (automatedPoll) clearRequest(true);
+
+        if (automatedPoll) clearRequest(false);
     }
 
     private String sanitizeHistoryText(String value) {
@@ -354,7 +394,8 @@ public class LineReadAccessibilityService extends AccessibilityService {
                         if (!isLineRoot(root)) continue;
                         sawLineWindow = true;
                         ScanResult result = scanTree(root, target);
-                        targetVisible |= result.targetVisible;
+                        if (!result.targetVisible) continue;
+                        targetVisible = true;
                         readCount += result.readCount;
                         maxReadBottom = Math.max(maxReadBottom, result.maxReadBottom);
                         incoming.addAll(result.incomingTokens);
@@ -370,7 +411,8 @@ public class LineReadAccessibilityService extends AccessibilityService {
                     if (!isLineRoot(root)) continue;
                     sawLineWindow = true;
                     ScanResult result = scanTree(root, target);
-                    targetVisible |= result.targetVisible;
+                    if (!result.targetVisible) continue;
+                    targetVisible = true;
                     readCount += result.readCount;
                     maxReadBottom = Math.max(maxReadBottom, result.maxReadBottom);
                     incoming.addAll(result.incomingTokens);
@@ -382,10 +424,12 @@ public class LineReadAccessibilityService extends AccessibilityService {
             AccessibilityNodeInfo root = getRootInActiveWindow();
             if (isLineRoot(root)) {
                 ScanResult result = scanTree(root, target);
-                targetVisible = result.targetVisible;
-                readCount = result.readCount;
-                maxReadBottom = result.maxReadBottom;
-                incoming.addAll(result.incomingTokens);
+                if (result.targetVisible) {
+                    targetVisible = true;
+                    readCount = result.readCount;
+                    maxReadBottom = result.maxReadBottom;
+                    incoming.addAll(result.incomingTokens);
+                }
             }
         }
 
@@ -447,8 +491,6 @@ public class LineReadAccessibilityService extends AccessibilityService {
         for (int i = start; i < clean.size(); i++) {
             MessageToken token = clean.get(i);
             if (sig.length() > 0) sig.append('|');
-            // Use only normalized content, not screen coordinates. Opening the same chat can
-            // reposition bubbles; coordinates made the old code falsely report a new message.
             sig.append(token.value);
         }
         String preview = clean.isEmpty() ? "" : clean.get(clean.size() - 1).value;
