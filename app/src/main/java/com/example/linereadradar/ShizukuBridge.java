@@ -19,13 +19,18 @@ final class ShizukuBridge {
     static final String SHIZUKU_PACKAGE = "moe.shizuku.privileged.api";
     private static final String LINE_PACKAGE = "jp.naver.line.android";
 
+    private static final int OP_LAUNCH = 1;
+    private static final int OP_ENSURE_DISPLAY = 2;
+    private static final int OP_QUERY_DISPLAY = 3;
+    private static final int OP_RELEASE_DISPLAY = 4;
+
     interface ResultCallback {
         void onResult(Result result);
     }
 
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static final Object LOCK = new Object();
-    private static final Queue<PendingLaunch> PENDING = new ArrayDeque<>();
+    private static final Queue<PendingRequest> PENDING = new ArrayDeque<>();
     private static IRadarShellService shellService;
     private static boolean binding;
 
@@ -115,6 +120,31 @@ final class ShizukuBridge {
         }
     }
 
+    static void ensureVirtualDisplay(Context context, int width, int height, int densityDpi,
+                                     ResultCallback callback) {
+        if (!permissionGranted()) {
+            post(callback, Result.fail("Shizuku 尚未取得授權"));
+            return;
+        }
+        submit(PendingRequest.ensureDisplay(width, height, densityDpi, callback));
+    }
+
+    static void queryVirtualDisplay(ResultCallback callback) {
+        if (!permissionGranted()) {
+            post(callback, Result.fail("Shizuku 尚未取得授權"));
+            return;
+        }
+        submit(PendingRequest.queryDisplay(callback));
+    }
+
+    static void releaseVirtualDisplay(ResultCallback callback) {
+        if (!permissionGranted()) {
+            post(callback, Result.fail("Shizuku 尚未取得授權"));
+            return;
+        }
+        submit(PendingRequest.releaseDisplay(callback));
+    }
+
     static void launchLineOnDisplay(Context context, int displayId, ResultCallback callback) {
         if (!permissionGranted()) {
             post(callback, Result.fail("Shizuku 尚未取得授權"));
@@ -131,16 +161,15 @@ final class ShizukuBridge {
             return;
         }
 
-        PendingLaunch request = new PendingLaunch(
+        submit(PendingRequest.launch(
             LINE_PACKAGE,
             launch.getComponent().flattenToShortString(),
             displayId,
             callback
-        );
-        submit(request);
+        ));
     }
 
-    private static void submit(PendingLaunch request) {
+    private static void submit(PendingRequest request) {
         IRadarShellService service;
         synchronized (LOCK) {
             service = shellService;
@@ -164,7 +193,7 @@ final class ShizukuBridge {
 
     private static void drainPending() {
         while (true) {
-            PendingLaunch pending;
+            PendingRequest pending;
             IRadarShellService service;
             synchronized (LOCK) {
                 service = shellService;
@@ -179,35 +208,65 @@ final class ShizukuBridge {
         }
     }
 
-    private static void executeOnWorker(IRadarShellService service, PendingLaunch request) {
+    private static void executeOnWorker(IRadarShellService service, PendingRequest request) {
         new Thread(() -> {
             try {
-                String raw = service.startActivityOnDisplay(
-                    request.packageName,
-                    request.componentName,
-                    request.displayId
-                );
-                post(request.callback, parse(raw));
+                Result result;
+                switch (request.operation) {
+                    case OP_ENSURE_DISPLAY: {
+                        int id = service.ensureVirtualDisplay(
+                            request.width, request.height, request.densityDpi);
+                        String detail = safeStatus(service.getVirtualDisplayStatus());
+                        result = id > 0
+                            ? Result.ok(id, detail)
+                            : Result.fail(detail.isEmpty() ? "Shizuku 建立第二 Display 失敗" : detail);
+                        break;
+                    }
+                    case OP_QUERY_DISPLAY: {
+                        int id = service.getVirtualDisplayId();
+                        String detail = safeStatus(service.getVirtualDisplayStatus());
+                        result = id > 0
+                            ? Result.ok(id, detail)
+                            : Result.fail(detail.isEmpty() ? "Shizuku 第二 Display 不存在" : detail);
+                        break;
+                    }
+                    case OP_RELEASE_DISPLAY: {
+                        service.releaseVirtualDisplay();
+                        result = Result.ok(-1, "Shizuku 第二 Display 已釋放");
+                        break;
+                    }
+                    case OP_LAUNCH:
+                    default: {
+                        String raw = service.startActivityOnDisplay(
+                            request.packageName,
+                            request.componentName,
+                            request.displayId
+                        );
+                        result = parseLaunch(raw);
+                        break;
+                    }
+                }
+                post(request.callback, result);
             } catch (Throwable t) {
                 synchronized (LOCK) { shellService = null; }
                 post(request.callback,
                     Result.fail(t.getClass().getSimpleName() + ": " + safe(t.getMessage())));
             }
-        }, "RadarShizukuLaunch").start();
+        }, "RadarShizukuOp").start();
     }
 
-    private static Result parse(String raw) {
+    private static Result parseLaunch(String raw) {
         if (raw == null) return Result.fail("Shizuku UserService 沒有回傳結果");
         if (raw.startsWith("OK")) {
             String detail = raw.length() > 2 ? raw.substring(2).trim() : "";
-            return Result.ok(detail.isEmpty() ? "LINE launch completed" : detail);
+            return Result.ok(-1, detail.isEmpty() ? "LINE launch completed" : detail);
         }
         return Result.fail(raw.trim().isEmpty() ? "LINE launch failed" : raw.trim());
     }
 
     private static void failPending(String message) {
         while (true) {
-            PendingLaunch pending;
+            PendingRequest pending;
             synchronized (LOCK) { pending = PENDING.poll(); }
             if (pending == null) return;
             post(pending.callback, Result.fail(message));
@@ -219,36 +278,75 @@ final class ShizukuBridge {
         MAIN.post(() -> callback.onResult(result));
     }
 
+    private static String safeStatus(String value) {
+        return value == null ? "" : value.trim();
+    }
+
     private static String safe(String value) {
         return value == null || value.trim().isEmpty() ? "unknown error" : value.trim();
     }
 
-    private static final class PendingLaunch {
+    private static final class PendingRequest {
+        final int operation;
         final String packageName;
         final String componentName;
         final int displayId;
+        final int width;
+        final int height;
+        final int densityDpi;
         final ResultCallback callback;
 
-        PendingLaunch(String packageName, String componentName, int displayId,
-                      ResultCallback callback) {
+        private PendingRequest(int operation, String packageName, String componentName,
+                               int displayId, int width, int height, int densityDpi,
+                               ResultCallback callback) {
+            this.operation = operation;
             this.packageName = packageName;
             this.componentName = componentName;
             this.displayId = displayId;
+            this.width = width;
+            this.height = height;
+            this.densityDpi = densityDpi;
             this.callback = callback;
+        }
+
+        static PendingRequest launch(String pkg, String component, int displayId,
+                                     ResultCallback callback) {
+            return new PendingRequest(OP_LAUNCH, pkg, component, displayId, 0, 0, 0, callback);
+        }
+
+        static PendingRequest ensureDisplay(int width, int height, int densityDpi,
+                                            ResultCallback callback) {
+            return new PendingRequest(OP_ENSURE_DISPLAY, null, null, -1,
+                width, height, densityDpi, callback);
+        }
+
+        static PendingRequest queryDisplay(ResultCallback callback) {
+            return new PendingRequest(OP_QUERY_DISPLAY, null, null, -1, 0, 0, 0, callback);
+        }
+
+        static PendingRequest releaseDisplay(ResultCallback callback) {
+            return new PendingRequest(OP_RELEASE_DISPLAY, null, null, -1, 0, 0, 0, callback);
         }
     }
 
     static final class Result {
         final boolean success;
         final String message;
+        final int displayId;
 
-        private Result(boolean success, String message) {
+        private Result(boolean success, String message, int displayId) {
             this.success = success;
             this.message = message == null ? "" : message;
+            this.displayId = displayId;
         }
 
-        static Result ok(String message) { return new Result(true, message); }
-        static Result fail(String message) { return new Result(false, message); }
+        static Result ok(int displayId, String message) {
+            return new Result(true, message, displayId);
+        }
+
+        static Result fail(String message) {
+            return new Result(false, message, -1);
+        }
     }
 
     private ShizukuBridge() {}
