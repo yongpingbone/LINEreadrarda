@@ -29,15 +29,8 @@
 
         <activity
             android:name=".ExperimentalLabActivity"
-            android:exported="true"
-            android:label="Radar Lab"
-            android:icon="@mipmap/ic_launcher"
-            android:roundIcon="@mipmap/ic_launcher_round">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
+            android:exported="false"
+            android:label="Radar Lab" />
 
         <service
             android:name=".MonitorForegroundService"
