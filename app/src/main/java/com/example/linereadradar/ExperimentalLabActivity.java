@@ -17,6 +17,10 @@ import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
+
 public class ExperimentalLabActivity extends Activity {
     private static final int BG = Color.rgb(6, 10, 28);
     private static final int CARD = Color.rgb(16, 23, 51);
@@ -28,12 +32,14 @@ public class ExperimentalLabActivity extends Activity {
     private static final String SHIZUKU_RELEASES = "https://github.com/RikkaApps/Shizuku/releases";
 
     private Prefs prefs;
+    private HealthDiagnostics health;
     private LinearLayout body;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = new Prefs(this);
+        health = new HealthDiagnostics(this);
         getWindow().setStatusBarColor(BG);
         getWindow().setNavigationBarColor(BG);
         buildUi();
@@ -68,26 +74,89 @@ public class ExperimentalLabActivity extends Activity {
         if (body == null) return;
         body.removeAllViews();
 
+        long now = System.currentTimeMillis();
+
         body.addView(text("Radar Lab ✦", 25, true, TEXT));
-        TextView intro = text("這裡是進階診斷頁。一般使用者直接在人物卡開啟「背景持續監控」即可，Radar 會自動完成 Shizuku 與第二螢幕設定。", 13, false, MUTED);
+        TextView intro = text("這裡是進階診斷頁。背景監控現在拆成 Display、LINE root、目標聊天室三層，不再把『看到 LINE』直接等同於『聊天室持續更新』。", 13, false, MUTED);
         intro.setPadding(0, dp(5), 0, dp(15));
         body.addView(intro);
 
         LinearLayout status = card();
-        status.addView(text("環境狀態", 19, true, TEXT));
+        status.addView(text("三層健康狀態", 19, true, TEXT));
         status.addView(statusLine(ShizukuBridge.isShizukuInstalled(this), "Shizuku App", ShizukuBridge.isShizukuInstalled(this) ? "已安裝" : "未安裝"));
         status.addView(statusLine(ShizukuBridge.binderReady(), "Shizuku 服務", ShizukuBridge.stateText(this)));
         status.addView(statusLine(ShizukuBridge.permissionGranted(), "Radar Shizuku 權限", ShizukuBridge.permissionGranted() ? "已授權" : "未授權"));
 
         int displayId = VirtualDisplayEngine.displayId();
-        boolean displayOk = displayId >= 0;
-        status.addView(statusLine(displayOk, "第二螢幕", displayOk ? "Display " + displayId + " 運作中" : prefs.virtualDisplayStatus()));
+        boolean displayOk = displayId >= 0 && prefs.virtualDisplayRunning() && prefs.virtualDisplayId() == displayId;
+        status.addView(statusLine(displayOk, "① Display alive", displayOk ? "Display " + displayId + " 運作中" : prefs.virtualDisplayStatus()));
 
+        long lineSeenAt = prefs.secondaryLineSeenAt();
         boolean lineOk = displayOk
             && prefs.secondaryLineDisplayId() == displayId
-            && System.currentTimeMillis() - prefs.secondaryLineSeenAt() <= 15000L;
-        status.addView(statusLine(lineOk, "LINE 第二螢幕驗證", lineOk ? "✓ Accessibility 已看到 LINE" : "尚未看到 LINE"));
+            && now - lineSeenAt <= 15000L;
+        status.addView(statusLine(
+            lineOk,
+            "② LINE root visible",
+            lineSeenAt > 0
+                ? "最後看到 " + formatAt(lineSeenAt) + " · " + ageText(now, lineSeenAt)
+                : "Accessibility 尚未看到第二 Display 的 LINE root"
+        ));
+
+        int targetCount = 0;
+        for (int i = 0; i < Prefs.MAX_SLOTS; i++) {
+            Prefs.Slot slot = prefs.slot(i);
+            if (!slot.backgroundActive()) continue;
+            targetCount++;
+            long targetAt = health.targetChatSeenAt(i);
+            boolean targetOk = displayOk
+                && health.targetChatDisplayId(i) == displayId
+                && targetAt > 0
+                && now - targetAt <= 5000L;
+            status.addView(statusLine(
+                targetOk,
+                "③ 目標聊天室 · " + slot.name,
+                targetAt > 0
+                    ? "最後實際掃到 " + formatAt(targetAt) + " · " + ageText(now, targetAt)
+                    : "尚未在第二 Display 實際掃到這個聊天室"
+            ));
+        }
+        if (targetCount == 0) {
+            status.addView(statusLine(false, "③ 目標聊天室", "目前沒有啟用背景監控的對象"));
+        }
         body.addView(status, margin(0, 0, 0, 12));
+
+        LinearLayout diagnostics = card();
+        diagnostics.addView(text("故障時間軸", 18, true, TEXT));
+        diagnostics.addView(text("下次漏抓時直接比對下面時間，不再猜 Samsung / Accessibility 哪一層先停。", 12, false, MUTED));
+        diagnostics.addView(diagnosticLine("last pulse success", health.lastPulseSuccessAt(), now));
+        diagnostics.addView(diagnosticLine("last LINE root seen", prefs.secondaryLineSeenAt(), now));
+        for (int i = 0; i < Prefs.MAX_SLOTS; i++) {
+            Prefs.Slot slot = prefs.slot(i);
+            if (slot.name.isEmpty()) continue;
+            long targetAt = health.targetChatSeenAt(i);
+            long treeAt = health.lastTreeSignatureChangeAt(i);
+            diagnostics.addView(diagnosticLine("last target chat seen · " + slot.name, targetAt, now));
+            String sig = health.treeSignature(i);
+            diagnostics.addView(diagnosticLine(
+                "last tree signature change · " + slot.name + (sig.isEmpty() ? "" : " · " + sig),
+                treeAt,
+                now
+            ));
+        }
+        diagnostics.addView(diagnosticLine("last hard refresh", health.lastHardRefreshAt(), now));
+        body.addView(diagnostics, margin(0, 0, 0, 12));
+
+        LinearLayout recovery = card();
+        recovery.addView(text("自我修復 gate", 18, true, TEXT));
+        recovery.addView(text(
+            "heartbeat 與 hard refresh 現在只看：\n" +
+            "✓ Display 還活著\n" +
+            "✓ Shizuku 已連線並授權\n" +
+            "✓ 至少一個背景監控對象仍啟用\n\n" +
+            "不再要求 Accessibility 必須先回報 LINE root。即使第②層已經斷掉，第①層還活著時仍會持續嘗試救回 LINE。",
+            12, false, MUTED));
+        body.addView(recovery, margin(0, 0, 0, 12));
 
         LinearLayout actions = card();
         actions.addView(text("手動操作", 18, true, TEXT));
@@ -147,25 +216,25 @@ public class ExperimentalLabActivity extends Activity {
         LinearLayout success = card();
         success.addView(text("什麼才算背景模式成功？", 18, true, TEXT));
         success.addView(text(
-            "必須同時看到：\n" +
-            "✓ Shizuku 已啟動並授權\n" +
-            "✓ 第二 Display 存在\n" +
-            "✓ Accessibility 在第二 Display 看得到 LINE\n\n" +
-            "只有『Display 已建立』還不算成功。成功後主畫面可自由使用其他 App，也不需要懸浮視窗。",
+            "要分三層看：\n" +
+            "① Display alive：第二 Display 本身存在\n" +
+            "② LINE root visible：Accessibility 還看得到第二 Display 的 LINE\n" +
+            "③ Target chat updating：Radar 真的持續掃得到指定聊天室\n\n" +
+            "只有①或只有①＋②都不能再稱為『持續監控成功』。",
             13, false, MUTED));
         body.addView(success, margin(0, 0, 0, 12));
 
         LinearLayout screenOff = card();
         screenOff.addView(text("息屏測試", 18, true, TEXT));
         screenOff.addView(text(
-            "v0.6 已移除 MediaProjection 依賴，改成非 Root Shizuku + Virtual Display。第二畫面不應再因 Android 停止螢幕錄製工作階段而直接消失。\n\n" +
-            "但不同 Android / Samsung 版本對虛擬顯示器與鎖屏仍可能有額外限制，因此必須實機驗證：鎖屏後 Display 是否仍存在、LINE Accessibility 是否仍可讀、已讀提醒是否能持續收到。",
+            "v0.6 已移除 MediaProjection 依賴，改成非 Root Shizuku + Virtual Display。\n\n" +
+            "息屏後若漏抓，先不要手動打開 LINE。直接進 Radar Lab 截圖『故障時間軸』，就能判斷是 pulse 還活著但 LINE root 斷了、LINE root 還活著但目標聊天室不再更新，或整個 Display/Shizuku 已停止。",
             12, false, MUTED));
         body.addView(screenOff, margin(0, 0, 0, 12));
 
         LinearLayout readProtection = card();
         readProtection.addView(text("No-Read 保護", 18, true, TEXT));
-        readProtection.addView(text("No-Read 與 Shizuku 第二螢幕是不同層。已確認有效的 No-Read 行為先維持不變；第二螢幕是否成功，仍要看上面的 LINE 驗證狀態。", 12, false, MUTED));
+        readProtection.addView(text("No-Read 與 Shizuku 第二螢幕是不同層。已確認有效的 No-Read 行為維持不變；這次只調整第二 Display 的存活、恢復與診斷鏈路。", 12, false, MUTED));
         body.addView(readProtection, margin(0, 0, 0, 12));
 
         LinearLayout saveCard = card();
@@ -198,6 +267,29 @@ public class ExperimentalLabActivity extends Activity {
             saveCard.addView(none);
         }
         body.addView(saveCard, margin(0, 0, 0, 12));
+    }
+
+    private LinearLayout diagnosticLine(String label, long at, long now) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setPadding(0, dp(9), 0, 0);
+        row.addView(text(label, 12, true, TEXT));
+        row.addView(text(at > 0 ? formatAt(at) + " · " + ageText(now, at) : "尚未發生", 11, false, at > 0 ? MUTED : AMBER));
+        return row;
+    }
+
+    private String formatAt(long at) {
+        if (at <= 0) return "--:--:--";
+        return new SimpleDateFormat("HH:mm:ss", Locale.TAIWAN).format(new Date(at));
+    }
+
+    private String ageText(long now, long at) {
+        if (at <= 0) return "尚未";
+        long seconds = Math.max(0L, (now - at) / 1000L);
+        if (seconds < 60L) return seconds + " 秒前";
+        long minutes = seconds / 60L;
+        if (minutes < 60L) return minutes + " 分前";
+        return (minutes / 60L) + " 小時前";
     }
 
     private LinearLayout statusLine(boolean ok, String label, String detail) {
