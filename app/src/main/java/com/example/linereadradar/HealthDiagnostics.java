@@ -15,6 +15,15 @@ final class HealthDiagnostics {
     private static final String K_LAST_NAV_ACTION = "last_navigation_action";
     private static final String K_LAST_NAV_SUCCESS = "last_navigation_success";
     private static final String K_LAST_NAV_DETAIL = "last_navigation_detail";
+    private static final String K_SHIELD_STATE_AT = "shield_state_at";
+    private static final String K_SHIELD_DISPLAY = "shield_display_id";
+    private static final String K_SHIELD_ALIVE = "shield_alive";
+    private static final String K_SHIELD_RESUMED = "shield_resumed";
+    private static final String K_SHIELD_WINDOW_FOCUS = "shield_window_focus";
+    private static final String K_SHIELD_TOP_RESUMED = "shield_top_resumed";
+    private static final String K_SHIELD_PROTECTING = "shield_protecting";
+    private static final String K_SHIELD_ACTIVE_SINCE = "shield_active_since";
+    private static final String K_SHIELD_EVENT = "shield_event";
 
     private final SharedPreferences p;
 
@@ -37,7 +46,16 @@ final class HealthDiagnostics {
             .remove(K_LAST_NAV_DISPLAY)
             .remove(K_LAST_NAV_ACTION)
             .remove(K_LAST_NAV_SUCCESS)
-            .remove(K_LAST_NAV_DETAIL);
+            .remove(K_LAST_NAV_DETAIL)
+            .remove(K_SHIELD_STATE_AT)
+            .remove(K_SHIELD_DISPLAY)
+            .remove(K_SHIELD_ALIVE)
+            .remove(K_SHIELD_RESUMED)
+            .remove(K_SHIELD_WINDOW_FOCUS)
+            .remove(K_SHIELD_TOP_RESUMED)
+            .remove(K_SHIELD_PROTECTING)
+            .remove(K_SHIELD_ACTIVE_SINCE)
+            .remove(K_SHIELD_EVENT);
         for (int i = 0; i < Prefs.MAX_SLOTS; i++) {
             e.remove(k(i, "target_seen_at"))
                 .remove(k(i, "target_display_id"))
@@ -111,6 +129,65 @@ final class HealthDiagnostics {
 
     String lastNavigationDetail() {
         return p.getString(K_LAST_NAV_DETAIL, "");
+    }
+
+    void markShieldState(int displayId, boolean alive, boolean resumed, boolean windowFocused,
+                         boolean topResumed, String event, long now) {
+        boolean protecting = alive && resumed && windowFocused;
+        boolean wasProtecting = p.getBoolean(K_SHIELD_PROTECTING, false);
+
+        SharedPreferences.Editor e = p.edit()
+            .putLong(K_SHIELD_STATE_AT, now)
+            .putInt(K_SHIELD_DISPLAY, displayId)
+            .putBoolean(K_SHIELD_ALIVE, alive)
+            .putBoolean(K_SHIELD_RESUMED, resumed)
+            .putBoolean(K_SHIELD_WINDOW_FOCUS, windowFocused)
+            .putBoolean(K_SHIELD_TOP_RESUMED, topResumed)
+            .putBoolean(K_SHIELD_PROTECTING, protecting)
+            .putString(K_SHIELD_EVENT, event == null ? "" : event);
+
+        if (protecting && !wasProtecting) {
+            e.putLong(K_SHIELD_ACTIVE_SINCE, now);
+        } else if (!alive) {
+            e.putLong(K_SHIELD_ACTIVE_SINCE, 0L);
+        }
+        e.apply();
+    }
+
+    long shieldStateAt() {
+        return p.getLong(K_SHIELD_STATE_AT, 0L);
+    }
+
+    int shieldDisplayId() {
+        return p.getInt(K_SHIELD_DISPLAY, -1);
+    }
+
+    boolean shieldAlive() {
+        return p.getBoolean(K_SHIELD_ALIVE, false);
+    }
+
+    boolean shieldResumed() {
+        return p.getBoolean(K_SHIELD_RESUMED, false);
+    }
+
+    boolean shieldWindowFocused() {
+        return p.getBoolean(K_SHIELD_WINDOW_FOCUS, false);
+    }
+
+    boolean shieldTopResumed() {
+        return p.getBoolean(K_SHIELD_TOP_RESUMED, false);
+    }
+
+    boolean shieldProtecting() {
+        return p.getBoolean(K_SHIELD_PROTECTING, false);
+    }
+
+    long shieldActiveSinceAt() {
+        return p.getLong(K_SHIELD_ACTIVE_SINCE, 0L);
+    }
+
+    String shieldEvent() {
+        return p.getString(K_SHIELD_EVENT, "");
     }
 
     void markTargetChatScan(int slot, int displayId, String treeSignature, long now) {
