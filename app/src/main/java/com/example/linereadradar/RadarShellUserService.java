@@ -8,6 +8,8 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 
 public class RadarShellUserService extends IRadarShellService.Stub {
+    private static final String LINE_PACKAGE = "jp.naver.line.android";
+
     public RadarShellUserService() {}
 
     @Keep
@@ -19,13 +21,22 @@ public class RadarShellUserService extends IRadarShellService.Stub {
     }
 
     @Override
-    public String execute(String command) {
-        if (command == null || command.trim().isEmpty()) return "ERR:2\nempty command";
+    public String startActivityOnDisplay(String packageName, String componentName, int displayId) {
+        if (!LINE_PACKAGE.equals(packageName)) return "ERR:2\npackage not allowed";
+        if (componentName == null || !componentName.startsWith(packageName + "/")) {
+            return "ERR:2\ninvalid component";
+        }
+        if (displayId <= 0) return "ERR:2\ninvalid display";
+
         Process process = null;
         try {
-            process = new ProcessBuilder("sh", "-c", command)
-                .redirectErrorStream(true)
-                .start();
+            process = new ProcessBuilder(
+                "am", "start",
+                "--user", "0",
+                "--display", String.valueOf(displayId),
+                "-n", componentName
+            ).redirectErrorStream(true).start();
+
             StringBuilder out = new StringBuilder();
             BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
             String line;
@@ -34,6 +45,7 @@ public class RadarShellUserService extends IRadarShellService.Stub {
                 out.append(line);
                 if (out.length() > 4000) break;
             }
+
             int code = process.waitFor();
             if (code == 0) return "OK\n" + out;
             return "ERR:" + code + "\n" + out;
