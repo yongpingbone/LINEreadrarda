@@ -69,5 +69,10 @@
             android:enabled="true"
             android:exported="true"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+
+        <meta-data android:name="xposedmodule" android:value="true" />
+        <meta-data android:name="xposeddescription" android:value="Experimental Root/LSPosed No-Read protection for LINE Radar secondary-display monitoring" />
+        <meta-data android:name="xposedminversion" android:value="53" />
+        <meta-data android:name="xposedscope" android:value="jp.naver.line.android" />
     </application>
 </manifest>
