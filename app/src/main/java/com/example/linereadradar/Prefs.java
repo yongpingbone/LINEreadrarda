@@ -7,7 +7,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 final class Prefs {
-    static final int MAX_SLOTS = 5;
+    static final int MAX_SLOTS = 1;
     static final int READ_DETECTOR_SCHEMA = 2;
 
     private static final String FILE = "radar_prefs";
@@ -78,7 +78,7 @@ final class Prefs {
         }
 
         boolean active() {
-            return !name.isEmpty() && enabled && (readEnabled || messageEnabled);
+            return !name.isEmpty() && enabled && readEnabled;
         }
 
         boolean backgroundActive() {
@@ -96,10 +96,10 @@ final class Prefs {
             p.getBoolean(k(index, "enabled"), true),
             p.getBoolean(k(index, "background"), false),
             p.getBoolean(k(index, "read"), true),
-            p.getBoolean(k(index, "messages"), true),
+            false,
             p.getBoolean(k(index, "notify"), true),
             p.getBoolean(k(index, "vibrate"), false),
-            p.getBoolean(k(index, "save_content"), false),
+            false,
             p.getBoolean(k(index, "armed"), false),
             p.getInt(k(index, "base_count"), 0),
             p.getInt(k(index, "base_max_y"), -1),
@@ -112,7 +112,7 @@ final class Prefs {
     }
 
     private Slot emptySlot(int index) {
-        return new Slot(index, "", true, false, true, true, true, false, false,
+        return new Slot(index, "", true, false, true, false, true, false, false,
             false, 0, -1, 0L, "", 0L, 0L, "尚未建立基準");
     }
 
@@ -154,7 +154,7 @@ final class Prefs {
                     .putBoolean(k(i, "enabled"), true)
                     .putBoolean(k(i, "background"), false)
                     .putBoolean(k(i, "read"), true)
-                    .putBoolean(k(i, "messages"), true)
+                    .putBoolean(k(i, "messages"), false)
                     .putBoolean(k(i, "notify"), true)
                     .putBoolean(k(i, "vibrate"), false)
                     .putBoolean(k(i, "save_content"), false)
@@ -203,10 +203,10 @@ final class Prefs {
 
     void setBackgroundEnabled(int index, boolean enabled) { p.edit().putBoolean(k(index, "background"), enabled).apply(); }
     void setReadEnabled(int index, boolean enabled) { p.edit().putBoolean(k(index, "read"), enabled).apply(); }
-    void setMessageEnabled(int index, boolean enabled) { p.edit().putBoolean(k(index, "messages"), enabled).apply(); }
+    void setMessageEnabled(int index, boolean enabled) { p.edit().putBoolean(k(index, "messages"), false).apply(); }
     void setNotifyEnabled(int index, boolean enabled) { p.edit().putBoolean(k(index, "notify"), enabled).apply(); }
     void setVibrateEnabled(int index, boolean enabled) { p.edit().putBoolean(k(index, "vibrate"), enabled).apply(); }
-    void setSaveMessageContentEnabled(int index, boolean enabled) { p.edit().putBoolean(k(index, "save_content"), enabled).apply(); }
+    void setSaveMessageContentEnabled(int index, boolean enabled) { p.edit().putBoolean(k(index, "save_content"), false).apply(); }
 
     void armSlot(int index, int count, int maxY, String incomingSignature, long now) {
         p.edit()
@@ -347,15 +347,7 @@ final class Prefs {
     void clearHistory() { p.edit().remove(K_HISTORY).apply(); }
 
     int nextBackgroundSlot() {
-        int start = Math.max(0, Math.min(pollIndex(), MAX_SLOTS - 1));
-        for (int offset = 0; offset < MAX_SLOTS; offset++) {
-            int index = (start + offset) % MAX_SLOTS;
-            if (slot(index).backgroundActive()) {
-                setPollIndex((index + 1) % MAX_SLOTS);
-                return index;
-            }
-        }
-        return -1;
+        return slot(0).backgroundActive() ? 0 : -1;
     }
 
     private void migrateLegacyIfNeeded() {
@@ -368,7 +360,7 @@ final class Prefs {
                 .putBoolean(k(0, "enabled"), true)
                 .putBoolean(k(0, "background"), false)
                 .putBoolean(k(0, "read"), true)
-                .putBoolean(k(0, "messages"), true)
+                .putBoolean(k(0, "messages"), false)
                 .putBoolean(k(0, "notify"), true)
                 .putBoolean(k(0, "vibrate"), false)
                 .putBoolean(k(0, "save_content"), false)

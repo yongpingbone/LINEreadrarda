@@ -2,7 +2,7 @@ name: Build LINE Radar APK
 
 on:
   push:
-    branches: [ main, ui/v0.4.2-person-first, exp/v0.5.2-display-noread, exp/v0.6-shizuku-noroot ]
+    branches: [ main, ui/v0.4.2-person-first, exp/v0.5.2-display-noread, exp/v0.6-shizuku-noroot, exp/v0.7-root ]
   workflow_dispatch:
 
 permissions:
@@ -36,12 +36,18 @@ jobs:
         run: gradle --no-daemon clean testDebugUnitTest assembleDebug
 
       - name: Rename APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk LINE-Radar-v0.6.18-Shizuku.apk
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_NAME}" == "exp/v0.7-root" ]]; then
+            cp app/build/outputs/apk/debug/app-debug.apk LINE-Radar-v0.7.0-Root-LSPosed.apk
+          else
+            cp app/build/outputs/apk/debug/app-debug.apk LINE-Radar-v0.7.0-Shizuku.apk
+          fi
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: LINE-Radar-v0.6.18-Shizuku
-          path: LINE-Radar-v0.6.18-Shizuku.apk
+          name: LINE-Radar-${{ github.ref_name == 'exp/v0.7-root' && 'v0.7.0-Root-LSPosed' || 'v0.7.0-Shizuku' }}
+          path: LINE-Radar-*.apk
           if-no-files-found: error
           retention-days: 14

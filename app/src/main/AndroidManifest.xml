@@ -19,9 +19,7 @@
         android:supportsRtl="true"
         android:theme="@style/AppTheme">
 
-        <activity
-            android:name=".MainActivity"
-            android:exported="true">
+        <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -33,22 +31,13 @@
             android:exported="false"
             android:label="Radar Lab" />
 
-        <activity
-            android:name=".NoReadShieldActivity"
-            android:exported="true"
-            android:permission="android.permission.DUMP"
-            android:excludeFromRecents="true"
-            android:launchMode="singleTask"
-            android:taskAffinity="com.example.linereadradar.noreadshield"
-            android:theme="@style/NoReadShieldTheme" />
-
         <service
             android:name=".MonitorForegroundService"
             android:exported="false"
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Keeps the user's explicit LINE read and message monitoring session alive while this app is backgrounded." />
+                android:value="Supports the user's explicit first-time LINE read-monitor baseline setup." />
         </service>
 
         <service
@@ -57,7 +46,7 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Keeps LINE Radar's user-enabled safe background monitoring session alive." />
+                android:value="Keeps one user-selected LINE conversation available on a Shizuku virtual display for screen-off read-receipt monitoring." />
         </service>
 
         <service
@@ -73,16 +62,6 @@
                 android:resource="@xml/accessibility_service_config" />
         </service>
 
-        <service
-            android:name=".LineNotificationListener"
-            android:label="LINE Radar"
-            android:exported="true"
-            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
-            <intent-filter>
-                <action android:name="android.service.notification.NotificationListenerService" />
-            </intent-filter>
-        </service>
-
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
             android:authorities="${applicationId}.shizuku"
@@ -90,10 +69,5 @@
             android:enabled="true"
             android:exported="true"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
-
-        <meta-data android:name="xposedmodule" android:value="true" />
-        <meta-data android:name="xposeddescription" android:value="Experimental LINE Radar No-Read hook for the user's own LINE session" />
-        <meta-data android:name="xposedminversion" android:value="53" />
-        <meta-data android:name="xposedscope" android:value="jp.naver.line.android" />
     </application>
 </manifest>
